@@ -1,0 +1,3 @@
+[submodule "hanabi-live"]
+	path = hanabi-live
+	url = https://github.com/Hanabi-Live/hanabi-live.git
