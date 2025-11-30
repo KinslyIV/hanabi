@@ -1,6 +1,0 @@
-[submodule "hanabi-live"]
-	path = hanabi-live
-	url = https://github.com/Hanabi-Live/hanabi-live.git
-[submodule "hanabi-live-bot"]
-	path = hanabi-live-bot
-	url = https://github.com/Hanabi-Live/hanabi-live-bot.git
