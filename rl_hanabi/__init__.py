@@ -1,0 +1,1 @@
+"""Python Hanabi bot package."""

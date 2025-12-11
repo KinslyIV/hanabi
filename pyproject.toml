@@ -5,8 +5,19 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pettingzoo>=1.25.0",
+    "dotenv>=0.9.9",
+    "gymnasium>=1.2.2",
+    "hanabi-learning-environment",
+    "numpy>=2.3.5",
+    "pettingzoo[classic]>=1.25.0",
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",
+    "shimmy>=2.0.0",
+    "stable-baselines3>=2.7.0",
+    "supersuit>=3.10.0",
+    "torch>=2.9.1",
     "websocket-client>=1.9.0",
 ]
+
+[tool.uv.sources]
+hanabi-learning-environment = { path = "hanabi-learning-environment" }
