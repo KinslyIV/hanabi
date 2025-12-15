@@ -20,7 +20,7 @@ class CLUE:
 # Incoming actions from server (subset used for random bot)
 @dataclass
 class StatusAction:
-    type: Literal["status"]
+    _type: Literal["status"]
     clues: int
     score: int
     maxScore: int
@@ -28,23 +28,23 @@ class StatusAction:
 
 @dataclass
 class TurnAction:
-    type: Literal["turn"]
+    _type: Literal["turn"]
     num: int
     currentPlayerIndex: int
 
 
 @dataclass
 class BaseClue:
-    type: Literal[CLUE.COLOUR, CLUE.RANK] # type: ignore
+    _type: Literal[CLUE.COLOUR, CLUE.RANK] # type: ignore
     value: int
 
 
 @dataclass
 class ClueAction:
-    type: Literal["clue"]
+    _type: Literal["clue"]
     giver: int
     target: int
-    list: list[int]
+    _list: list[int]
     clue: BaseClue
     mistake: Optional[bool] = None
 
@@ -59,24 +59,24 @@ class CardAction:
 
 @dataclass
 class DrawAction(CardAction):
-    type: Literal["draw"]
+    _type: Literal["draw"]
 
 
 @dataclass
 class PlayAction(CardAction):
-    type: Literal["play"]
+    _type: Literal["play"]
 
 
 @dataclass
 class DiscardAction(CardAction):
-    type: Literal["discard"]
+    _type: Literal["discard"]
     failed: bool
 
 
 # Outgoing perform action (what we send on our turn)
 @dataclass
 class PerformAction:
-    type: int  # one of ACTION.*
+    _type: int  # one of ACTION.*
     target: int  # for PLAY/DISCARD: card order; for CLUE: player index
     value: Optional[int] = None  # for CLUE: colour index or rank value
 

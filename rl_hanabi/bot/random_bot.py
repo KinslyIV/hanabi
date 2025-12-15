@@ -90,14 +90,14 @@ class RandomBot(Bot):
                 if pa:
                     # small delay to look human-ish
                     def _send():
-                        payload = {"tableID": self.table_id, "type": pa.type, "target": pa.target}
-                        if pa.type in (ACTION.COLOUR, ACTION.RANK) and pa.value is not None:
+                        payload = {"tableID": self.table_id, "type": pa._type, "target": pa.target}
+                        if pa._type in (ACTION.COLOUR, ACTION.RANK) and pa.value is not None:
                             payload["value"] = pa.value
                         
                         if self.state:
                             self.logger.info(
                                 "Sending action: type=%s target=%s our_hand=%s clues=%s turn=%s",
-                                pa.type,
+                                pa._type,
                                 pa.target,
                                 list(self.state.our_hand),
                                 self.state.clue_tokens,

@@ -121,4 +121,4 @@ class GameState:
         # this baseline always plays a random card from our hand.
         target_order = random.choice(self.our_hand)
 
-        return PerformAction(type=ACTION.PLAY, target=target_order)
+        return PerformAction(_type=ACTION.PLAY, target=target_order)
