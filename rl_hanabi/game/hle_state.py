@@ -21,6 +21,7 @@ class HLEGameState:
     game: pyhanabi.HanabiGame
     state: pyhanabi.HanabiState
     our_index: int
+    player_shift: int = 0
 
     # ----- construction -------------------------------------------------
 
@@ -36,6 +37,8 @@ class HLEGameState:
         The mapping from Hanab.live options to pyhanabi parameters is kept
         minimal for now and can be extended as needed.
         """
+        starting_player = int(options.get("startingPlayer", 0))
+
         params = {
             "players": num_players,
             "colors": int(options.get("numSuits", 5)),
@@ -44,7 +47,7 @@ class HLEGameState:
             "max_information_tokens": int(options.get("clueTokens", 8)),
             "max_life_tokens": int(options.get("strikeTokens", 3)),
             "seed": int(options.get("seed", -1)),
-            "random_start_player": False,
+            "random_start_player": False, # We handle shift manually
             "observation_type": pyhanabi.AgentObservationType.CARD_KNOWLEDGE,
         }
         game = pyhanabi.HanabiGame(params)
@@ -54,7 +57,7 @@ class HLEGameState:
         while state.cur_player() == pyhanabi.CHANCE_PLAYER_ID:
             state.deal_random_card()
             
-        return cls(game=game, state=state, our_index=our_index)
+        return cls(game=game, state=state, our_index=our_index, player_shift=starting_player)
     
     def __repr__(self) -> str:
         return self.state.__repr__()
@@ -67,6 +70,7 @@ class HLEGameState:
             game=self.game,
             state=self.state.copy(),
             our_index=self.our_index,
+            player_shift=self.player_shift,
         )
 
     @property
@@ -83,7 +87,8 @@ class HLEGameState:
 
     @property
     def current_player_index(self) -> int:
-        return self.state.cur_player()
+        # Map HLE index back to Hanab.live index
+        return (self.state.cur_player() + self.player_shift) % self.num_players
 
     def is_terminal(self) -> bool:
         return self.state.is_terminal()
@@ -294,15 +299,29 @@ class HLEGameState:
         pyhanabi expects a target offset (0 = current player, 1 = next, ...).
         We convert player indices into the corresponding offset.
         """
-        offset = (target_player - self.current_player_index) % self.num_players
+        # Map target_player (Hanab.live index) to HLE index
+        target_hle = (target_player - self.player_shift) % self.num_players
+        current_hle = self.state.cur_player()
+        
+        offset = (target_hle - current_hle) % self.num_players
         move = pyhanabi.HanabiMove.get_reveal_color_move(offset, color_index)
         self.safe_apply_move(move)
 
-    def apply_rank_clue(self, target_player: int, rank: int) -> None:
-        """Apply a rank clue to target_player (rank is 0-based)."""
-        offset = (target_player - self.current_player_index) % self.num_players
-        move = pyhanabi.HanabiMove.get_reveal_rank_move(offset, rank)
+    def apply_rank_clue(self, target_player: int, rank_index: int) -> None:
+        """Apply a rank clue to target_player.
+
+        pyhanabi expects a target offset (0 = current player, 1 = next, ...).
+        We convert player indices into the corresponding offset.
+        """
+        # Map target_player (Hanab.live index) to HLE index
+        target_hle = (target_player - self.player_shift) % self.num_players
+        current_hle = self.state.cur_player()
+        
+        offset = (target_hle - current_hle) % self.num_players
+        move = pyhanabi.HanabiMove.get_reveal_rank_move(offset, rank_index)
         self.safe_apply_move(move)
+
+
 
 
     # ----- observations -------------------------------------------------
