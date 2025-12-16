@@ -2,215 +2,55 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from rl_hanabi.bot.bot import Bot
+from rl_hanabi.bot.base_bot import BaseBot
 from rl_hanabi.game.game_types import ACTION
-from rl_hanabi.game.state import GameState
 
 
-class RandomBot(Bot):
+class RandomBot(BaseBot):
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(enable_hle=False)
         self.logger = logging.getLogger("rl_hanabi.random_bot")
-        self.state: Optional[GameState] = None
-        self.tables: Dict[str, Dict[str, Any]] = {}
-        self.last_sender: Optional[str] = None
-        self.game_started: bool = False
 
-    # --- Core message handler ---
-    def handle_msg(self, command: str, data: Dict[str, Any]) -> None:
-        self.logger.debug("Received command=%s data=%s", command, data)
-        if command == "welcome":
-            self.self_info = data
-        elif command == "tableList":
-            for t in data:
-                self.tables[t["id"]] = t # type: ignore
-        elif command == "table":
-            self.tables[data["id"]] = data
-        elif command == "tableGone":
-            tid = data.get("tableID")
-            if tid in self.tables:
-                del self.tables[tid]
-        elif command == "joined":
-            self.table_id = data.get("tableID")
-            self.game_started = False
-        elif command == "left":
-            self.table_id = None
-            self.game_started = False
-            self.state = None
-        elif command == "tableStart":
-            self.table_id = data.get("tableID")
-            self.game_started = True
-            # Request initial info (mirrors JS bot)
-            self.send_cmd("getGameInfo1", {"tableID": self.table_id})
-        elif command == "init":
-            # Initialize minimal state and ask for more info
-            self.table_id = data.get("tableID")
-            player_names: List[str] = data.get("playerNames", [])
-            our_idx: int = data.get("ourPlayerIndex") # type: ignore
-            options: Dict[str, Any] = data.get("options", {})
-            # For this random baseline, we disable the HLE shadow state to
-            # avoid pyhanabi assertion crashes; we only need a local mirror of
-            # hands and basic table info to choose random legal plays.
-            self.state = GameState(player_names, our_idx, len(player_names), options, enable_hle=False)
-            self.send_cmd("getGameInfo2", {"tableID": self.table_id})
-        elif command == "gameActionList":
-            # Catch-up: apply all historical actions into our state/HLE shadow.
-            lst: List[Dict[str, Any]] = data.get("list", [])
-            for a in lst:
-                self._apply_action(a)
-            # Notify loaded like JS bot
-            if self.table_id is not None:
-                self.send_cmd("loaded", {"tableID": self.table_id})
-        elif command == "gameAction":
-            self._apply_action(data.get("action", {}))
-        elif command == "warning":
-            warn = data.get("warning")
-            self.logger.warning("Server warning: %s", warn)
-            if self.last_sender:
-                self.send_pm(self.last_sender, str(warn))
-                self.last_sender = None
-        elif command == "chat":
-            self._handle_chat(data)
-
-    # --- Apply game events ---
-    def _apply_action(self, action: Dict[str, Any]) -> None:
+    def make_move(self) -> None:
         if not self.state:
             return
-        t = action.get("type")
-        self.logger.debug("Apply action type=%s payload=%s", t, action)
-        if t == "status":
-            self.state.apply_status(action.get("clues", self.state.clue_tokens))
-        elif t == "turn":
-            self.state.apply_turn(action.get("num", self.state.turn_count), action.get("currentPlayerIndex", self.state.current_player_index))
-            # If it's our turn, choose a random action
-            if self.state.current_player_index == self.state.our_index and self.table_id is not None:
-                pa = self.state.random_action()
-                if pa:
-                    # small delay to look human-ish
-                    def _send():
-                        payload = {"tableID": self.table_id, "type": pa._type, "target": pa.target}
-                        if pa._type in (ACTION.COLOUR, ACTION.RANK) and pa.value is not None:
-                            payload["value"] = pa.value
-                        
-                        if self.state:
-                            self.logger.info(
-                                "Sending action: type=%s target=%s our_hand=%s clues=%s turn=%s",
-                                pa._type,
-                                pa.target,
-                                list(self.state.our_hand),
-                                self.state.clue_tokens,
-                                self.state.turn_count,
-                            )
-                        self.send_cmd("action", payload)
+        
+        pa = self.state.random_action()
+        if pa:
+            # small delay to look human-ish
+            def _send():
+                if self.table_id is None:
+                    return
+                    
+                payload = {"tableID": self.table_id, "type": pa._type, "target": pa.target}
+                if pa._type in (ACTION.COLOUR, ACTION.RANK) and pa.value is not None:
+                    payload["value"] = pa.value
+                
+                if self.state:
+                    self.logger.info(
+                        "Sending action: type=%s target=%s our_hand=%s clues=%s turn=%s",
+                        pa._type,
+                        pa.target,
+                        list(self.state.our_hand),
+                        self.state.clue_tokens,
+                        self.state.turn_count,
+                    )
+                self.send_cmd("action", payload)
 
-                    threading.Timer(0.5, _send).start()
-        elif t == "draw":
-            self.state.apply_draw(action.get("order"), action.get("playerIndex")) # type: ignore
-        elif t == "play":
-            self.state.apply_play(action.get("order"), action.get("playerIndex")) # type: ignore
-        elif t == "discard":
-            self.state.apply_discard(action.get("order"), action.get("playerIndex")) # type: ignore
-        elif t == "clue":
-            # Mirror clues into the HLE shadow state when present.
-            clue = action.get("clue", {})
-            clue_type = clue.get("type")
-            value = clue.get("value")
-            giver = action.get("giver")
-            target = action.get("target")
-            if clue_type is not None and value is not None and giver is not None and target is not None:
-                self.state.apply_clue(giver, target, clue_type, value)
-        elif t == "gameOver":
-            self.game_started = False
+            threading.Timer(0.5, _send).start()
 
-    # --- Chat commands ---
+    # Optional: Override chat to give specific version info
     def _handle_chat(self, data: Dict[str, Any]) -> None:
         msg: str = data.get("msg", "")
         who: str = data.get("who", "")
-        room: str = data.get("room", "")
-        recipient: str = data.get("recipient", "")
-
-        self.logger.info("Chat message from=%s room=%s recipient=%s msg=%s", who, room, recipient, msg)
-
-        within_room = recipient == "" and room.startswith("table")
-        if within_room:
-            if msg.startswith("/leaveall"):
-                self.leave_room()
-            # ignore '/setall' for random bot
-            return
-
-        # Only respond to PMs directed to us
-        if not self.self_info or recipient != self.self_info.get("username"):
-            return
-
-        self.last_sender = who
-
-        if msg.startswith("/join"):
-            table = self._find_table_for_user(who)
-            if table is None:
-                self.send_pm(who, "Could not join; you are not in a room.")
-                return
-            if not table.get("passwordProtected", False):
-                self.send_cmd("tableJoin", {"tableID": table["id"]})
-            else:
-                parts = msg.split(" ", 1)
-                if len(parts) == 1:
-                    self.send_pm(who, "Room is password protected; please provide a password.")
-                else:
-                    self.send_cmd("tableJoin", {"tableID": table["id"], "password": parts[1]})
-        elif msg.startswith("/rejoin"):
-            if self.table_id is not None:
-                self.send_pm(who, "Already in a game.")
-                return
-            table = self._find_table_with_player(self.self_info.get("username", ""))
-            if table is None:
-                self.send_pm(who, "Not a player in any open room.")
-            else:
-                self.send_cmd("tableReattend", {"tableID": table["id"]})
-        elif msg.startswith("/leave"):
-            if self.table_id is None:
-                self.send_pm(who, "Not currently in a room.")
-                return
-            self.leave_room()
-        elif msg.startswith("/create"):
-            parts = msg.split(" ")
-            name = parts[1] if len(parts) > 1 else "rl-bot"
-            max_players = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 2
-            password = parts[3] if len(parts) > 3 else None
-            arg: Dict[str, Any] = {"name": name, "maxPlayers": max_players}
-            if password:
-                arg["password"] = password
-            self.send_cmd("tableCreate", arg)
-        elif msg.startswith("/start"):
-            if self.table_id is not None:
-                self.send_cmd("tableStart", {"tableID": self.table_id})
-        elif msg.startswith("/restart"):
-            if self.table_id is not None:
-                self.send_cmd("tableRestart", {"tableID": self.table_id, "hidePregame": True})
-        elif msg.startswith("/remake"):
-            if self.table_id is not None:
-                self.send_cmd("tableRestart", {"tableID": self.table_id, "hidePregame": False})
-        elif msg.startswith("/version"):
+        
+        if msg.startswith("/version"):
             self.send_pm(who, "rl-random-bot v0.1")
+            return
         elif msg.startswith("/settings"):
             self.send_pm(who, "This bot ignores convention settings; plays randomly.")
-        else:
-            self.send_pm(who, "Unrecognized command.")
-
-    def _find_table_for_user(self, username: str) -> Optional[Dict[str, Any]]:
-        # Prefer a table where the user is a player or spectator
-        candidates = []
-        for t in self.tables.values():
-            if username in t.get("players", []) or any(s.get("name") == username for s in t.get("spectators", [])):
-                candidates.append(t)
-        if not candidates:
-            return None
-        # Return the one with max id (latest)
-        return max(candidates, key=lambda x: x.get("id", -1))
-
-    def _find_table_with_player(self, username: str) -> Optional[Dict[str, Any]]:
-        for t in self.tables.values():
-            if username in t.get("players", []):
-                return t
-        return None
+            return
+            
+        super()._handle_chat(data)
