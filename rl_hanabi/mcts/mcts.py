@@ -5,6 +5,7 @@ import numpy as np
 import math
 import time
 import logging
+import multiprocessing
 from rl_hanabi.game.hle_state import HLEGameState
 from hanabi_learning_environment.pyhanabi import HanabiMove
 
@@ -250,10 +251,44 @@ class MCTS:
             move = random.choice(legal_moves)
             current_state.apply_move(move)
         return current_state.score() / current_state.max_score()
+    
+
+    def run_parallel(self, remaining_time_ms: int = 0):
+        if self.root_node is None:
+            raise Exception("Root Node is None in MCTS run_parallel")
+        
+        children = self.root_node.expanded_children
+        if not children:
+            return
+
+        pool_args = []
+        for child in children:
+            pool_args.append((
+                child.state.copy(),
+                child.last_action,
+                child.c,
+                child.prior,
+                self.model,
+                self.device,
+                remaining_time_ms
+            ))
+
+        with multiprocessing.Pool(processes=6) as pool:
+            results = pool.map(parallel_worker, pool_args)
+
+        for child, (n_visits, value) in zip(children, results):
+            child.n_visits += n_visits
+            child.value += value
+            
+        total_visits = sum(r[0] for r in results)
+        total_value = sum(r[1] for r in results)
+        
+        self.root_node.n_visits += total_visits
+        self.root_node.value += total_value
 
 
     @torch.no_grad
-    def run(self, use_rollouts: bool = False):
+    def run(self, use_rollouts: bool = False, run_parallel: bool = False):
 
         if self.root_node is None:
             raise Exception("Root Node is None in MCTS run")
@@ -264,6 +299,10 @@ class MCTS:
         node = self.root_node
         start_time = time.time()
         while (time.time() - start_time) * 1000 < self.time_ms:
+
+            if self.root_node.is_fully_expanded and run_parallel:
+                self.run_parallel(self.time_ms - int((time.time() - start_time) * 1000))
+                break
 
             if node.is_terminal:
                 expanded = node
@@ -311,6 +350,16 @@ class MCTS:
             prob_dist_out /= np.sum(prob_dist_out)
     
         return prob_dist_out, self.root_node.q_value
+
+
+def parallel_worker(args):
+    state, last_action, c, prior, model, device, time_ms = args
+    root = Node(state, last_action, None, c, prior)
+    mcts = MCTS(model, device, time_ms, root)
+    root.mcts = mcts
+    mcts.run()
+    return root.n_visits, root.value
+
         
 
 
