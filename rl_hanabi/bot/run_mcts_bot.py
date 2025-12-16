@@ -22,7 +22,7 @@ def main():
         return
 
     # You can adjust time_limit_ms here
-    bot = MCTSBot(time_limit_ms=1000)
+    bot = MCTSBot(time_limit_ms=3000)
     logger = logging.getLogger("rl_hanabi.run_mcts_bot")
     bot.on_open = lambda: logger.info("WebSocket open")
     bot.on_close = lambda code, reason: logger.info("WebSocket closed: %s %s", code, reason)

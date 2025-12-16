@@ -25,6 +25,7 @@ class MCTSBot(BaseBot):
         
         # Use a copy of the current HLE state as root
         root_state = self.state.hle_state.copy()
+        print(f"Root state before MCTS:\n{root_state}\n")
         mcts.init_root(root_state, c=1)
         self.logger.info("Starting MCTS for %d ms...", self.time_limit_ms)
         
@@ -53,23 +54,31 @@ class MCTSBot(BaseBot):
         
         if move_type == pyhanabi.HanabiMoveType.PLAY:
             card_index = move.card_index()
-            if card_index < len(self.state.our_hand):
-                card_order = self.state.our_hand[card_index]
+            # HLE index 0 is oldest, hanab.live index 0 is newest.
+            # We need to convert HLE index to hanab.live index.
+            hand_size = len(self.state.our_hand)
+            hanab_index = hand_size - 1 - card_index
+
+            if 0 <= hanab_index < hand_size:
+                card_order = self.state.our_hand[hanab_index]
                 payload["type"] = ACTION.PLAY
                 payload["target"] = card_order
                 self.send_cmd("action", payload)
             else:
-                self.logger.error(f"Invalid card index for play: {card_index}")
+                self.logger.error(f"Invalid card index for play: {card_index} -> {hanab_index}")
 
         elif move_type == pyhanabi.HanabiMoveType.DISCARD:
             card_index = move.card_index()
-            if card_index < len(self.state.our_hand):
-                card_order = self.state.our_hand[card_index]
+            hand_size = len(self.state.our_hand)
+            hanab_index = hand_size - 1 - card_index
+
+            if 0 <= hanab_index < hand_size:
+                card_order = self.state.our_hand[hanab_index]
                 payload["type"] = ACTION.DISCARD
                 payload["target"] = card_order
                 self.send_cmd("action", payload)
             else:
-                self.logger.error(f"Invalid card index for discard: {card_index}")
+                self.logger.error(f"Invalid card index for discard: {card_index} -> {hanab_index}")
 
         elif move_type == pyhanabi.HanabiMoveType.REVEAL_COLOR:
             target_offset = move.target_offset()

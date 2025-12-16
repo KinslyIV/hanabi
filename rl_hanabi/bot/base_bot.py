@@ -18,6 +18,7 @@ class BaseBot(Bot):
         self.last_sender: Optional[str] = None
         self.game_started: bool = False
         self.enable_hle = enable_hle
+        self.catchup = False
 
     # --- Core message handler ---
     def handle_msg(self, command: str, data: Dict[str, Any]) -> None:
@@ -61,16 +62,29 @@ class BaseBot(Bot):
             self.send_cmd("getGameInfo2", {"tableID": self.table_id})
         elif command == "gameActionList":
             # Catch-up: apply all historical actions into our state/HLE shadow.
+            self.catchup = True
             lst: List[Dict[str, Any]] = data.get("list", [])
             for a in lst:
                 self._apply_action(a)
                 self.logger.info(f"Applied action from history: {a}")
+            self.catchup = False
+            
             # Notify loaded like JS bot
             self.logger.info(f"Game loaded for tableID: {self.table_id}")
             if self.table_id is not None:
                 self.send_cmd("loaded", {"tableID": self.table_id})
+            
+            # Check if it's our turn immediately after loading history
+            if self.state:
+                self.logger.info(f"History loaded. Turn: {self.state.current_player_index} Our: {self.state.our_index} Table: {self.table_id}")
+                if self.state.current_player_index == self.state.our_index and self.table_id is not None:
+                    self.logger.info("It's our turn after history load. Making move.")
+                    self.make_move()
+                else:
+                    self.logger.info("Not our turn after history load.")
+
         elif command == "gameAction":
-            self.logger.info("Game action received: ", data)
+            self.logger.info(f"Game action received: {data}")
             self._apply_action(data.get("action", {}))
         elif command == "warning":
             warn = data.get("warning")
@@ -96,14 +110,15 @@ class BaseBot(Bot):
         elif t == "turn":
             self.state.apply_turn(action.get("num", self.state.turn_count), action.get("currentPlayerIndex", self.state.current_player_index))
             # If it's our turn, make a move
-            if self.state.current_player_index == self.state.our_index and self.table_id is not None:
+            if not self.catchup and self.state.current_player_index == self.state.our_index and self.table_id is not None:
                 self.make_move()
         elif t == "draw":
-            self.state.apply_draw(action.get("order"), action.get("playerIndex")) # type: ignore
+            # Draw action has card info at top level (order, suitIndex, rank)
+            self.state.apply_draw(action.get("playerIndex"), action) # type: ignore
         elif t == "play":
-            self.state.apply_play(action.get("order"), action.get("playerIndex")) # type: ignore
+            self.state.apply_play(action.get("order"), action.get("playerIndex"), action) # type: ignore
         elif t == "discard":
-            self.state.apply_discard(action.get("order"), action.get("playerIndex")) # type: ignore
+            self.state.apply_discard(action.get("order"), action.get("playerIndex"), action) # type: ignore
         elif t == "clue":
             # Mirror clues into the HLE shadow state when present.
             clue = action.get("clue", {})
@@ -112,7 +127,7 @@ class BaseBot(Bot):
             giver = action.get("giver")
             target = action.get("target")
             if clue_type is not None and value is not None and giver is not None and target is not None:
-                self.state.apply_clue(giver, target, clue_type, value)
+                self.state.apply_clue(giver, target, clue_type, value, action)
         elif t == "gameOver":
             self.game_started = False
             self.logger.info("Game Over")
