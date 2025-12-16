@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List
+import logging
 
 import numpy as np
 from hanabi_learning_environment import pyhanabi
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class HLEGameState:
@@ -47,6 +49,11 @@ class HLEGameState:
         }
         game = pyhanabi.HanabiGame(params)
         state = game.new_initial_state()
+        
+        # Advance through initial chance nodes (dealing cards)
+        while state.cur_player() == pyhanabi.CHANCE_PLAYER_ID:
+            state.deal_random_card()
+            
         return cls(game=game, state=state, our_index=our_index)
     
     def __repr__(self) -> str:
@@ -169,7 +176,7 @@ class HLEGameState:
     
     def apply_move_by_index(self, index: int) -> None:
         move = self.index_to_move(index)
-        self.state.apply_move(move)
+        self.apply_move(move)
 
     def max_score(self) -> int:
         """Get the maximum possible score for the current game configuration."""
@@ -184,6 +191,67 @@ class HLEGameState:
 
     def apply_move(self, move: pyhanabi.HanabiMove) -> None:
         self.state.apply_move(move)
+        self._advance_chance_nodes()
+
+    def _advance_chance_nodes(self) -> None:
+        while self.state.cur_player() == pyhanabi.CHANCE_PLAYER_ID:
+            self.state.deal_random_card()
+
+    def safe_apply_move(self, move: pyhanabi.HanabiMove) -> None:
+        """Safely apply a move, checking for legality to avoid crashes.
+        
+        If the move is illegal (due to state divergence), we try to recover:
+        - If Discard is illegal (e.g. 8 clues), we Play instead (to consume card).
+        - If Play is illegal (unlikely), we Discard instead.
+        - If Clue is illegal (e.g. 0 clues), we skip it (no card consumed).
+        """
+        
+        # Check if move is legal in the current pyhanabi state
+        legal_moves = self.state.legal_moves()
+        is_legal = False
+        for lm in legal_moves:
+            if self.moves_are_equal(move, lm):
+                is_legal = True
+                break
+        
+        if is_legal:
+            self.state.apply_move(move)
+            self._advance_chance_nodes()
+            return
+
+        logger.warning(f"Illegal move detected in HLE shadow state: {move}. Attempting recovery.")
+        
+        move_type = move.type()
+        
+        # Recovery strategy:
+        # If we need to consume a card (Play/Discard), we MUST do something that consumes that card index.
+        if move_type == pyhanabi.HanabiMoveType.DISCARD:
+            # Try to Play instead
+            alt_move = pyhanabi.HanabiMove.get_play_move(move.card_index())
+            if self._is_legal(alt_move):
+                logger.warning(f"Recovering by PLAYING card {move.card_index()} instead of DISCARDING.")
+                self.state.apply_move(alt_move)
+                self._advance_chance_nodes()
+                return
+                
+        elif move_type == pyhanabi.HanabiMoveType.PLAY:
+            # Try to Discard instead
+            alt_move = pyhanabi.HanabiMove.get_discard_move(move.card_index())
+            if self._is_legal(alt_move):
+                logger.warning(f"Recovering by DISCARDING card {move.card_index()} instead of PLAYING.")
+                self.state.apply_move(alt_move)
+                self._advance_chance_nodes()
+                return
+
+        # If it's a clue, or we couldn't swap Play/Discard, we just skip it.
+        # Skipping a Play/Discard is bad because indices will shift, but better than crashing.
+        logger.error(f"Could not recover from illegal move {move}. Skipping. State may be desynced.")
+
+    def _is_legal(self, move: pyhanabi.HanabiMove) -> bool:
+        for lm in self.state.legal_moves():
+            if self.moves_are_equal(move, lm):
+                return True
+        return False
 
     @staticmethod
     def moves_are_equal(move1: pyhanabi.HanabiMove, move2: pyhanabi.HanabiMove) -> bool:
@@ -200,6 +268,12 @@ class HLEGameState:
         if move1.type() == pyhanabi.HanabiMoveType.REVEAL_RANK:
             return (move1.target_offset() == move2.target_offset()) and (move1.rank() == move2.rank())
             
+        if move1.type() == pyhanabi.HanabiMoveType.DEAL:
+            # Chance moves are considered equal if they deal the same card to the same player
+            # But usually we don't compare chance moves from outside.
+            # Just return True if types match for safety, or check details if possible.
+            return True
+
         raise ValueError(f"Unknown move type: {move1}")
 
     # ----- helpers used by GameState to mirror website actions ---------
@@ -207,12 +281,12 @@ class HLEGameState:
     def apply_play_from_hand_index(self, card_index: int) -> None:
         """Apply a PLAY move for the current player using a hand index."""
         move = pyhanabi.HanabiMove.get_play_move(card_index)
-        self.state.apply_move(move)
+        self.safe_apply_move(move)
 
     def apply_discard_from_hand_index(self, card_index: int) -> None:
         """Apply a DISCARD move for the current player using a hand index."""
         move = pyhanabi.HanabiMove.get_discard_move(card_index)
-        self.state.apply_move(move)
+        self.safe_apply_move(move)
 
     def apply_color_clue(self, target_player: int, color_index: int) -> None:
         """Apply a color clue to target_player.
@@ -222,13 +296,13 @@ class HLEGameState:
         """
         offset = (target_player - self.current_player_index) % self.num_players
         move = pyhanabi.HanabiMove.get_reveal_color_move(offset, color_index)
-        self.state.apply_move(move)
+        self.safe_apply_move(move)
 
     def apply_rank_clue(self, target_player: int, rank: int) -> None:
         """Apply a rank clue to target_player (rank is 0-based)."""
         offset = (target_player - self.current_player_index) % self.num_players
         move = pyhanabi.HanabiMove.get_reveal_rank_move(offset, rank)
-        self.state.apply_move(move)
+        self.safe_apply_move(move)
 
 
     # ----- observations -------------------------------------------------
