@@ -1,8 +1,7 @@
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict
-from hanabi_learning_environment import pyhanabi
+from typing import List, Tuple
 from rl_hanabi.game.hle_state import HLEGameState
 
 # Standard Hanabi deck composition per color: three 1s, two 2s, two 3s, two 4s, one 5.
@@ -59,7 +58,7 @@ class HandBelief:
     def size(self) -> int:
         return len(self.cards)
 
-@dataclass
+
 class BeliefState:
     """
     The public belief state (V-belief) as described in the BAD paper.
@@ -72,6 +71,11 @@ class BeliefState:
     # Track total counts of each card type remaining in the deck + hands
     # This is derived from the initial deck minus played and discarded cards.
     remaining_card_counts: np.ndarray 
+
+    def __init__(self, hands: List[HandBelief], remaining_card_counts: np.ndarray):
+        self.hands = hands
+        self.remaining_card_counts = remaining_card_counts
+
 
     def copy(self) -> 'BeliefState':
         new_hands = [
@@ -224,6 +228,7 @@ class BeliefState:
             
             card_belief.normalize()
 
+
     def update_from_play_discard(self, 
                                 player_index: int, 
                                 card_index: int, 
@@ -257,6 +262,7 @@ class BeliefState:
                     if c.probs[revealed_card_idx] > 0:
                         c.probs[revealed_card_idx] = 0.0
                         c.normalize()
+
 
     def update_from_draw(self, player_index: int):
         """
