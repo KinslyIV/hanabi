@@ -73,9 +73,17 @@ class GameState:
         return self.hle_state.copy()
 
     # --- Event application helpers (from server) ---
-    def apply_status(self, clues: int) -> None:
+    def apply_status(self, clues: int, lives: Optional[int] = None, score: Optional[int] = None) -> None:
         self.clue_tokens = clues
-        # HLE manages its own info tokens via moves; we do not override them here.
+        
+        # Sync HLE state to avoid illegal move warnings
+        if self.enable_hle and self.hle_state:
+            if self.hle_state.state.information_tokens() != clues:
+                self.hle_state.state.set_information_tokens(clues)
+            
+            if lives is not None:
+                if self.hle_state.state.life_tokens() != lives:
+                    self.hle_state.state.set_life_tokens(lives)
 
     def apply_turn(self, num: int, current_player_index: int) -> None:
         self.turn_count = num
@@ -99,6 +107,8 @@ class GameState:
                                    card_dict: Dict[str, Any]) -> None:
         if not (self.enable_hle and self.hle_state):
             return
+        
+        logging.info(f"Updating HLE card for player {player_index} hand index {hle_hand_idx} with {card_dict}")
 
         # Try to find suit/color
         c = card_dict.get("suitIndex")
@@ -129,12 +139,16 @@ class GameState:
 
             try:
                 card = pyhanabi.HanabiCard(hle_color, hle_rank)
+
+                logging.info(f"Setting HLE card for player {player_index} hand index {hle_hand_idx} to {card}")
                 
-                # Map player index to HLE index
-                hle_player_idx = (player_index - self.hle_state.player_shift) % self.hle_state.num_players
+                # With player_shift=0, HLE player index = website player index
+                hle_player_idx = player_index
                 
                 # Get the hand from HLE
                 hle_hand = self.hle_state.state.player_hands()[hle_player_idx]
+
+                logging.info(f"HLE player {hle_player_idx} hand before update: {hle_hand}")
                 
                 # Ensure we don't go out of bounds of HLE hand
                 if 0 <= hle_hand_idx < len(hle_hand):
@@ -177,10 +191,33 @@ class GameState:
             if card_dict:
                 self._update_hle_card_from_dict(player_index, hle_idx, card_dict)
 
-            self.hle_state.apply_discard_from_hand_index(hle_idx)
+            # Check if this was a failed play (which results in a discard event on the website)
+            failed_play = False
+            if card_dict and card_dict.get("failed") is True:
+                failed_play = True
+
+            if failed_play:
+                self.hle_state.apply_play_from_hand_index(hle_idx)
+            else:
+                self.hle_state.apply_discard_from_hand_index(hle_idx)
         self._remove_order(player_index, order)
 
-    def _fix_hand_for_clue(self, target: int, clue_type: int, value: int, clued_indices: List[int]) -> None:
+    def _fix_hand_for_clue(self, target: int, clue_type: int, value: int, clued_orders: List[int]) -> None:
+        """Fix the target player's hand in HLE to be consistent with the received clue.
+        
+        When we (the bot) receive a clue, the HLE state has random cards in our hand that
+        may not match the clue. This method reassigns cards to ensure consistency.
+        
+        Algorithm:
+        1. Calculate the pool of available cards (deck minus played/discarded/other hands)
+        2. The target's current hand cards are considered "returned to pool" for reassignment
+        3. Find valid card candidates for each slot based on the clue constraints
+        4. Use backtracking to find a consistent assignment
+        5. Apply the new assignment to HLE
+        
+        This should ALWAYS succeed because we're just shuffling which unknown cards are where,
+        and the clue tells us real information about the actual game state.
+        """
         if not (self.enable_hle and self.hle_state):
             return
 
@@ -190,29 +227,43 @@ class GameState:
         else:
             clue_val_hle = value
 
-        # Map target to HLE index
-        hle_target = (target - self.hle_state.player_shift) % self.hle_state.num_players
+        # With player_shift=0, HLE player index = website player index
+        hle_target = target
 
-        # Convert clued_indices (0=Newest) to HLE indices (0=Oldest)
+        clue_type_str = "COLOUR" if clue_type == CLUE.COLOUR else "RANK"
+        logging.debug(
+            f"_fix_hand_for_clue: target={target}, clue={clue_type_str}={value} (hle_val={clue_val_hle}), "
+            f"clued_orders={clued_orders}, our_hand_orders={self.hands[target]}"
+        )
+
+        # Convert clued_orders (card unique IDs) to hand indices
+        # self.hands[target] has orders with 0=Newest, then convert to HLE indices (0=Oldest)
         hand_size = len(self.hands[target])
         hle_clued_indices = set()
-        for idx in clued_indices:
-            hle_idx = hand_size - 1 - idx
-            hle_clued_indices.add(hle_idx)
+        for order in clued_orders:
+            # Find the index of this order in the target's hand
+            try:
+                hand_idx = self.hands[target].index(order)
+                # Convert from website index (0=Newest) to HLE index (0=Oldest)
+                hle_idx = hand_size - 1 - hand_idx
+                hle_clued_indices.add(hle_idx)
+            except ValueError:
+                logging.warning(f"Clue order {order} not found in target's hand: {self.hands[target]}")
 
-        # Calculate available cards (Hidden set)
+        logging.debug(f"HLE clued indices (0=oldest): {hle_clued_indices}")
+
+        # Calculate available cards (the "hidden" pool that could be in our hand)
         total_counts = Counter()
         num_colors = self.hle_state.game.num_colors()
         num_ranks = self.hle_state.game.num_ranks()
         
+        all_card_types = []
         for c in range(num_colors):
             for r in range(num_ranks):
-                # 1:3, 2:2, 3:2, 4:2, 5:1
-                count = 0
-                if r == 0: count = 3
-                elif r == 4: count = 1
-                else: count = 2
+                # Get actual card count from game (handles variants correctly)
+                count = self.hle_state.game.num_cards(c, r)
                 total_counts[(c, r)] = count
+                all_card_types.append((c, r))
         
         # Subtract visible
         # Discards
@@ -225,7 +276,7 @@ class GameState:
             for r in range(top_r):
                 total_counts[(c, r)] -= 1
         
-        # Other players' hands
+        # Other players' hands (NOT the target)
         hands = self.hle_state.state.player_hands()
         for p_idx, hand in enumerate(hands):
             if p_idx != hle_target:
@@ -234,20 +285,23 @@ class GameState:
         
         # Current target hand in HLE
         target_hand = hands[hle_target]
-        new_hand : list[Optional[pyhanabi.HanabiCard]] = [None] * len(target_hand)
+        
+        logging.debug(f"HLE target hand before fix: {[str(c) for c in target_hand]}")
+        logging.debug(f"Available pool (excluding target hand): {dict((k,v) for k,v in total_counts.items() if v > 0)}")
+        
+        # IMPORTANT: The target hand's current cards are NOT subtracted from total_counts yet.
+        # This is intentional - we're treating them as "returned to the pool" so we can
+        # reassign consistent cards. However, we need to track them separately to ensure
+        # the final assignment doesn't use more copies than exist in the deck.
         
         # Helper to check if card fits constraint
         def fits(c_idx, r_idx, slot_idx):
             if not self.hle_state:
                 return False
             
-            # Check positive knowledge using observation
-            hle_our_idx = (self.our_index - self.hle_state.player_shift) % self.hle_state.num_players
-            obs = self.hle_state.state.observation(hle_our_idx)
-            know = obs.card_knowledge()[hle_target][slot_idx]
-            
-            if know.color() is not None and know.color() != c_idx: return False
-            if know.rank() is not None and know.rank() != r_idx: return False
+            # We only check constraints from the CURRENT clue, not previous knowledge.
+            # Previous knowledge in HLE might be based on incorrect card assignments,
+            # so we ignore it and only enforce the new clue constraints.
             
             # Check clue constraints
             is_clued = slot_idx in hle_clued_indices
@@ -265,38 +319,75 @@ class GameState:
             
             return True
 
-        # First pass: Try to keep existing cards
-        for i, card in enumerate(target_hand):
-            c, r = card.color(), card.rank()
-            if fits(c, r, i) and total_counts[(c, r)] > 0:
-                new_hand[i] = card
-                total_counts[(c, r)] -= 1
-        
-        # Second pass: Fill missing slots
+        # Find candidates for each slot
+        slot_candidates = []
         for i in range(len(target_hand)):
-            if new_hand[i] is None:
-                # Find a card in total_counts that fits
-                found = False
-                for (c, r), count in total_counts.items():
-                    if count > 0 and fits(c, r, i):
-                        # Found one
-                        card = pyhanabi.HanabiCard(c, r)
-                        new_hand[i] = card 
-                        total_counts[(c, r)] -= 1
-                        found = True
-                        break
-                
-                if not found:
-                    logging.warning(f"Could not find consistent card for slot {i} in clue fix. Keeping original.")
-                    new_hand[i] = target_hand[i] # Fallback
+            # Check existing card first
+            current_card = target_hand[i]
+            current_cr = (current_card.color(), current_card.rank())
+            
+            possible_types = []
+            for (c, r) in all_card_types:
+                if total_counts[(c, r)] > 0 and fits(c, r, i):
+                    possible_types.append((c, r))
+            
+            # Sort candidates: put current card first if it's in the list
+            if current_cr in possible_types:
+                possible_types.remove(current_cr)
+                possible_types.insert(0, current_cr)
+            
+            slot_candidates.append(possible_types)
+
+        # Solve assignment using backtracking
+        # Sort slots by number of candidates to fail fast / handle constraints
+        sorted_indices = sorted(range(len(target_hand)), key=lambda k: len(slot_candidates[k]))
+        
+        final_assignment = [None] * len(target_hand)
+        
+        def solve(idx_in_sorted):
+            if idx_in_sorted == len(target_hand):
+                return True
+            
+            original_idx = sorted_indices[idx_in_sorted]
+            candidates = slot_candidates[original_idx]
+            
+            for (c, r) in candidates:
+                if total_counts[(c, r)] > 0:
+                    total_counts[(c, r)] -= 1
+                    final_assignment[original_idx] = pyhanabi.HanabiCard(c, r) # type: ignore
                     
-        # Apply changes to HLE
-        for i, card in enumerate(new_hand):
-            # Compare content, not just object identity
-            if card is None:
-                continue
-            if card.color() != target_hand[i].color() or card.rank() != target_hand[i].rank():
-                self.hle_state.state.set_hand_card(hle_target, i, card)
+                    if solve(idx_in_sorted + 1):
+                        return True
+                    
+                    # Backtrack
+                    total_counts[(c, r)] += 1
+                    final_assignment[original_idx] = None
+            
+            return False
+
+        if solve(0):
+            # Apply changes to HLE
+            changes_made = 0
+            for i, card in enumerate(final_assignment):
+                if card is None: continue
+                if card.color() != target_hand[i].color() or card.rank() != target_hand[i].rank():
+                    self.hle_state.state.set_hand_card(hle_target, i, card)
+                    logging.debug(f"Fixed slot {i}: {target_hand[i]} -> {card}")
+                    changes_made += 1
+            
+            # Log final hand
+            new_hand = self.hle_state.state.player_hands()[hle_target]
+            logging.debug(f"HLE target hand after fix ({changes_made} changes): {[str(c) for c in new_hand]}")
+        else:
+            # This should never happen if the algorithm is correct
+            clue_type_str = "COLOUR" if clue_type == CLUE.COLOUR else "RANK"
+            logging.error(
+                f"Could not find consistent hand for clue fix! "
+                f"Clue: {clue_type_str}={value}, clued_indices={hle_clued_indices}, "
+                f"target_hand={[str(c) for c in target_hand]}, "
+                f"slot_candidates={slot_candidates}, "
+                f"remaining_counts={dict((k,v) for k,v in total_counts.items() if v > 0)}"
+            )
 
     def apply_clue(self, giver: int, target: int, clue_type: int, value: int, 
                    action: Optional[Dict[str, Any]] = None) -> None:
@@ -316,10 +407,10 @@ class GameState:
             self._fix_hand_for_clue(target, clue_type, value, clued_list)
 
         if clue_type == CLUE.COLOUR:
-            self.hle_state.apply_color_clue(target, value)
+            self.hle_state.apply_color_clue(target, value, giver)
         elif clue_type == CLUE.RANK:
             # Hanab.live ranks are 1-based; pyhanabi expects 0-based.
-            self.hle_state.apply_rank_clue(target, value - 1)
+            self.hle_state.apply_rank_clue(target, value - 1, giver)
 
     # --- Random baseline policy (unchanged) ---
     def random_action(self) -> Optional[PerformAction]:

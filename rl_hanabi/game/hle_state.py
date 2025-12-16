@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import logging
 
 import numpy as np
@@ -34,8 +34,18 @@ class HLEGameState:
     ) -> "HLEGameState":
         """Create a fresh HanabiGame + initial HanabiState.
 
-        The mapping from Hanab.live options to pyhanabi parameters is kept
-        minimal for now and can be extended as needed.
+        IMPORTANT: We use player_shift=0, meaning HLE player indices equal website player indices.
+        HLE player 0 = website player 0, etc.
+        
+        However, HLE always starts with cur_player() = 0, while website may have startingPlayer != 0.
+        This means HLE and website may have different "current players" at the start.
+        
+        We handle this by applying actions from the website in order. Since every action
+        (play/discard/clue) advances the turn in HLE, and the website sends actions in order,
+        the HLE state will naturally align with the website state after each action.
+        
+        The key is that we don't try to "pre-sync" HLE to the website's starting player.
+        Instead, we let the action stream do the synchronization.
         """
         starting_player = int(options.get("startingPlayer", 0))
 
@@ -47,7 +57,7 @@ class HLEGameState:
             "max_information_tokens": int(options.get("clueTokens", 8)),
             "max_life_tokens": int(options.get("strikeTokens", 3)),
             "seed": int(options.get("seed", -1)),
-            "random_start_player": False, # We handle shift manually
+            "random_start_player": False,
             "observation_type": pyhanabi.AgentObservationType.CARD_KNOWLEDGE,
         }
         game = pyhanabi.HanabiGame(params)
@@ -56,8 +66,13 @@ class HLEGameState:
         # Advance through initial chance nodes (dealing cards)
         while state.cur_player() == pyhanabi.CHANCE_PLAYER_ID:
             state.deal_random_card()
+        
+        # Use player_shift=0: HLE player indices = website player indices
+        # Note: HLE starts with cur_player()=0 regardless of website's startingPlayer.
+        # This will be aligned after processing the game's action history.
+        logger.info(f"HLE initialized: website startingPlayer={starting_player}, HLE cur_player={state.cur_player()}, player_shift=0")
             
-        return cls(game=game, state=state, our_index=our_index, player_shift=starting_player)
+        return cls(game=game, state=state, our_index=our_index, player_shift=0)
     
     def __repr__(self) -> str:
         return self.state.__repr__()
@@ -87,8 +102,8 @@ class HLEGameState:
 
     @property
     def current_player_index(self) -> int:
-        # Map HLE index back to Hanab.live index
-        return (self.state.cur_player() + self.player_shift) % self.num_players
+        # With player_shift=0, HLE player index = website player index
+        return self.state.cur_player()
 
     def is_terminal(self) -> bool:
         return self.state.is_terminal()
@@ -210,15 +225,13 @@ class HLEGameState:
         - If Play is illegal (unlikely), we Discard instead.
         - If Clue is illegal (e.g. 0 clues), we skip it (no card consumed).
         """
+
+        logger.info(f"Current HLE state before move: \n{self.state}\n")
+        logger.info(f"Applying move safely: \n{move}\n")
         
         # Check if move is legal in the current pyhanabi state
-        legal_moves = self.state.legal_moves()
         is_legal = False
-        for lm in legal_moves:
-            if self.moves_are_equal(move, lm):
-                is_legal = True
-                break
-        
+        is_legal = self.state.move_is_legal(move)
         if is_legal:
             self.state.apply_move(move)
             self._advance_chance_nodes()
@@ -293,32 +306,86 @@ class HLEGameState:
         move = pyhanabi.HanabiMove.get_discard_move(card_index)
         self.safe_apply_move(move)
 
-    def apply_color_clue(self, target_player: int, color_index: int) -> None:
+    def apply_color_clue(self, target_player: int, color_index: int, giver_player: Optional[int] = None) -> None:
         """Apply a color clue to target_player.
 
-        pyhanabi expects a target offset (0 = current player, 1 = next, ...).
-        We convert player indices into the corresponding offset.
-        """
-        # Map target_player (Hanab.live index) to HLE index
-        target_hle = (target_player - self.player_shift) % self.num_players
-        current_hle = self.state.cur_player()
+        pyhanabi expects a target offset (1 = next player, 2 = player after, ...).
+        We convert player indices into the corresponding offset based on the giver.
         
-        offset = (target_hle - current_hle) % self.num_players
-        move = pyhanabi.HanabiMove.get_reveal_color_move(offset, color_index)
+        Note: We use giver_player (from website) to calculate the offset, not HLE's
+        cur_player(), because HLE might be desynced from the website due to different
+        starting players or other issues.
+        """
+        # With player_shift=0, HLE player index = website player index
+        target_hle = target_player
+        
+        # Use giver_player to determine who is giving the clue
+        if giver_player is not None:
+            giver_hle = giver_player
+        else:
+            giver_hle = self.state.cur_player()
+        
+        # Check for desync and log it
+        current_hle = self.state.cur_player()
+        if giver_hle != current_hle:
+            logger.warning(f"HLE Desync: Website giver {giver_player} != HLE cur_player {current_hle}. Using giver for offset calculation.")
+        
+        # Calculate offset from giver to target
+        offset = (target_hle - giver_hle) % self.num_players
+        
+        if offset == 0:
+            logger.error(f"Cannot apply clue: Target {target_player} equals giver {giver_player}. Skipping.")
+            return
+
+        # We need to apply a clue move in HLE. The move uses offset from HLE's cur_player.
+        # If HLE is desynced, we need to use the offset from HLE's cur_player, not from giver.
+        # But this could result in cluing the wrong player!
+        # 
+        # The safest approach: calculate what offset HLE needs to clue the correct target.
+        actual_offset = (target_hle - current_hle) % self.num_players
+        
+        if actual_offset == 0:
+            logger.error(f"Cannot apply clue in HLE: Target {target_hle} is HLE cur_player {current_hle}. Skipping.")
+            return
+
+        move = pyhanabi.HanabiMove.get_reveal_color_move(actual_offset, color_index)
         self.safe_apply_move(move)
 
-    def apply_rank_clue(self, target_player: int, rank_index: int) -> None:
+    def apply_rank_clue(self, target_player: int, rank_index: int, giver_player: Optional[int] = None) -> None:
         """Apply a rank clue to target_player.
 
-        pyhanabi expects a target offset (0 = current player, 1 = next, ...).
-        We convert player indices into the corresponding offset.
+        pyhanabi expects a target offset (1 = next player, 2 = player after, ...).
+        We convert player indices into the corresponding offset based on the giver.
         """
-        # Map target_player (Hanab.live index) to HLE index
-        target_hle = (target_player - self.player_shift) % self.num_players
-        current_hle = self.state.cur_player()
+        # With player_shift=0, HLE player index = website player index
+        target_hle = target_player
         
-        offset = (target_hle - current_hle) % self.num_players
-        move = pyhanabi.HanabiMove.get_reveal_rank_move(offset, rank_index)
+        # Use giver_player to determine who is giving the clue
+        if giver_player is not None:
+            giver_hle = giver_player
+        else:
+            giver_hle = self.state.cur_player()
+        
+        # Check for desync and log it
+        current_hle = self.state.cur_player()
+        if giver_hle != current_hle:
+            logger.warning(f"HLE Desync: Website giver {giver_player} != HLE cur_player {current_hle}. Using giver for offset calculation.")
+        
+        # Calculate offset from giver to target
+        offset = (target_hle - giver_hle) % self.num_players
+        
+        if offset == 0:
+            logger.error(f"Cannot apply clue: Target {target_player} equals giver {giver_player}. Skipping.")
+            return
+
+        # Calculate what offset HLE needs to clue the correct target.
+        actual_offset = (target_hle - current_hle) % self.num_players
+        
+        if actual_offset == 0:
+            logger.error(f"Cannot apply clue in HLE: Target {target_hle} is HLE cur_player {current_hle}. Skipping.")
+            return
+
+        move = pyhanabi.HanabiMove.get_reveal_rank_move(actual_offset, rank_index)
         self.safe_apply_move(move)
 
 

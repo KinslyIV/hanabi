@@ -49,6 +49,7 @@ class MCTSBot(BaseBot):
         if not self.state:
             return
 
+        logging.info(f"Sending Hanabi move: \n{move}\n")
         move_type = move.type()
         payload = {"tableID": self.table_id}
         

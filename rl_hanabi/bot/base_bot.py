@@ -106,7 +106,11 @@ class BaseBot(Bot):
         t = action.get("type")
         self.logger.debug(f"Apply action type={t} payload={action}")
         if t == "status":
-            self.state.apply_status(action.get("clues", self.state.clue_tokens))
+            self.state.apply_status(
+                action.get("clues", self.state.clue_tokens),
+                action.get("lives"),
+                action.get("score")
+            )
         elif t == "turn":
             self.state.apply_turn(action.get("num", self.state.turn_count), action.get("currentPlayerIndex", self.state.current_player_index))
             # If it's our turn, make a move
