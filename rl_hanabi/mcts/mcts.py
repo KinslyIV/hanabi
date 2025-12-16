@@ -1,5 +1,4 @@
 
-import copy
 import random
 import torch
 import numpy as np
@@ -11,7 +10,7 @@ from hanabi_learning_environment.pyhanabi import HanabiMove
 
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(filename='mcts_log.log', encoding='utf-8', level=logging.DEBUG)
+# logging.basicConfig(filename='mcts_log.log', encoding='utf-8', level=logging.DEBUG)
 
 
 
@@ -53,8 +52,16 @@ class Node:
 
     
     def set_prob_dist(self, prob_dist: np.ndarray):
-        assert prob_dist.shape == (self.max_moves,)
-        self.prob_dist = prob_dist
+        prob_dist_norm = prob_dist * self.valid_moves_bool
+
+        if np.sum(prob_dist_norm) > 0:
+            prob_dist_norm = prob_dist_norm / np.sum(prob_dist_norm)
+        else:
+            # Fallback to uniform distribution over valid moves
+            prob_dist_norm = np.zeros_like(prob_dist)
+            prob_dist_norm[self.valid_moves_bool] = 1.0 / np.sum(self.valid_moves_bool)
+
+        self.prob_dist = prob_dist_norm
 
 
     def new_mcts(self):
@@ -234,9 +241,19 @@ class MCTS:
             if child is not None:
                 self.decay_stats(child, factor)
 
+    def rollout_policy(self, state: HLEGameState, rollout_depth: int = 50) -> float:
+        current_state = state.copy()
+        for _ in range(rollout_depth):
+            if current_state.is_terminal():
+                break
+            legal_moves = current_state.legal_moves()
+            move = random.choice(legal_moves)
+            current_state.apply_move(move)
+        return current_state.score() / current_state.max_score()
+
 
     @torch.no_grad
-    def run(self):
+    def run(self, use_rollouts: bool = False):
 
         if self.root_node is None:
             raise Exception("Root Node is None in MCTS run")
@@ -259,23 +276,19 @@ class MCTS:
                 node = self.select()
                 continue
 
-            policy, value  = self.model(
-                torch.tensor(HLEGameState.encode_state(expanded.state, expanded.current_player), 
-                             dtype=torch.float32, device=self.device).unsqueeze(0))
-            policy = torch.softmax(policy, axis=1).squeeze(0).cpu().numpy() # type: ignore
-            policy *= node.valid_moves_bool
+            if use_rollouts:
+                policy = np.ones(expanded.max_moves, dtype=np.float32)
+                value = self.rollout_policy(expanded.state)
 
-            
-            if np.sum(policy) > 0:
-                prob_dist = policy / np.sum(policy)
             else:
-                # Fallback to uniform distribution over valid moves
-                prob_dist = np.zeros_like(policy)
-                prob_dist[node.valid_moves_bool] = 1.0 / np.sum(node.valid_moves_bool)
-                
-            value = value.item()
 
-            expanded.set_prob_dist(prob_dist)
+                policy, value  = self.model(
+                    torch.tensor(HLEGameState.encode_state(expanded.state, expanded.current_player), 
+                                dtype=torch.float32, device=self.device).unsqueeze(0))
+                policy = torch.softmax(policy, axis=1).squeeze(0).cpu().numpy() # type: ignore
+                value = value.item()
+
+            expanded.set_prob_dist(policy)
             
             self.backprop(expanded, value)
 
