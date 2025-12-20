@@ -6,7 +6,9 @@ import math
 import time
 import logging
 import multiprocessing
+from typing import Tuple, Optional
 from rl_hanabi.game.hle_state import HLEGameState
+from rl_hanabi.mcts.convention_rollout import ConventionRolloutPolicy, ParallelConventionRollout
 from hanabi_learning_environment.pyhanabi import HanabiMove
 
 
@@ -242,15 +244,56 @@ class MCTS:
             if child is not None:
                 self.decay_stats(child, factor)
 
-    def rollout_policy(self, state: HLEGameState, rollout_depth: int = 50) -> float:
-        current_state = state.copy()
-        for _ in range(rollout_depth):
-            if current_state.is_terminal():
-                break
-            legal_moves = current_state.legal_moves()
-            move = random.choice(legal_moves)
-            current_state.apply_move(move)
-        return current_state.score() / current_state.max_score()
+    def rollout_policy(self, node: Node, rollout_depth: int = 25, 
+                       num_rollouts: int = 1,
+                       use_parallel: bool = False) -> Tuple[np.ndarray, float]:
+        """
+        Convention-based rollout policy using H-Group beginner conventions.
+        
+        Implements:
+        - Play Clues: Prioritize cluing immediately playable cards
+        - 5 Save: Save 5s on chop with number 5 clue
+        - 2 Save: Save 2s on chop with number 2 clue
+        - Critical Save: Save last copy of cards on chop
+        - Smart discarding: Prefer discarding from chop (oldest unclued)
+        
+        Args:
+            node: The node to start rollouts from
+            rollout_depth: Maximum number of moves per rollout
+            num_rollouts: Number of rollouts to average (for variance reduction)
+            use_parallel: Whether to run rollouts in parallel
+            
+        Returns:
+            Tuple of (policy_distribution, value_estimate)
+        """
+        if use_parallel and num_rollouts > 1:
+            parallel_rollout = ParallelConventionRollout(
+                num_workers=min(num_rollouts, 4)
+            )
+            value, policy = parallel_rollout.run_rollouts(
+                node.state, num_rollouts, rollout_depth
+            )
+        else:
+            # Single or sequential rollouts
+            policy_rollout = ConventionRolloutPolicy()
+            
+            if num_rollouts == 1:
+                value, policy = policy_rollout.rollout(node.state, rollout_depth)
+            else:
+                # Multiple sequential rollouts
+                scores = []
+                policies = []
+                for _ in range(num_rollouts):
+                    score, prob = policy_rollout.rollout(node.state, rollout_depth)
+                    scores.append(score)
+                    policies.append(prob)
+                
+                value = float(np.mean(scores))
+                policy = np.mean(policies, axis=0)
+                if np.sum(policy) > 0:
+                    policy = policy / np.sum(policy)
+        
+        return policy, value
     
 
     def run_parallel(self, remaining_time_ms: int = 0):
@@ -288,10 +331,28 @@ class MCTS:
 
 
     @torch.no_grad
-    def run(self, use_rollouts: bool = False, run_parallel: bool = False):
+    def run(self, use_rollouts: bool = False, run_parallel: bool = False,
+            num_rollouts: int = 5, rollout_depth: int = 20,
+            parallel_rollouts: bool = False):
+        """
+        Run MCTS search.
+        
+        Args:
+            use_rollouts: If True, use convention-based rollouts instead of neural network
+            run_parallel: If True, run tree parallelization (parallel MCTS trees)
+            num_rollouts: Number of rollouts to average per node evaluation
+            rollout_depth: Maximum depth for each rollout
+            parallel_rollouts: If True, run rollouts in parallel (within each node)
+        """
 
         if self.root_node is None:
             raise Exception("Root Node is None in MCTS run")
+        
+        if self.model is None and not use_rollouts:
+            raise Exception("Model is None in MCTS run and rollouts are disabled")
+        
+        if use_rollouts:
+            run_parallel = False
         
         policy = None
         value = None
@@ -316,8 +377,13 @@ class MCTS:
                 continue
 
             if use_rollouts:
-                policy = np.ones(expanded.max_moves, dtype=np.float32)
-                value = self.rollout_policy(expanded.state)
+                # Use convention-based rollout policy
+                policy, value = self.rollout_policy(
+                    expanded, 
+                    rollout_depth=rollout_depth,
+                    num_rollouts=num_rollouts,
+                    use_parallel=parallel_rollouts
+                )
 
             else:
 
@@ -340,7 +406,6 @@ class MCTS:
             if child is not None and child.last_action is not None:
                 visit_counts[self.root_node.state.move_to_index(child.last_action)] = child.n_visits
 
-        visit_counts *= self.root_node.valid_moves_bool
 
         if np.sum(visit_counts) > 0:
             prob_dist_out = visit_counts / np.sum(visit_counts)
