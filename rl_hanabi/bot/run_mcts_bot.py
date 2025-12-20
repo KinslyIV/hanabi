@@ -27,6 +27,7 @@ def main():
     bot.on_open = lambda: logger.info("WebSocket open")
     bot.on_close = lambda code, reason: logger.info("WebSocket closed: %s %s", code, reason)
     bot.on_error = lambda e: logger.error("WebSocket error: %s", e)
+    bot.on_reconnect = lambda attempt: logger.info("Attempting reconnection #%d...", attempt)
 
     bot.connect()
 

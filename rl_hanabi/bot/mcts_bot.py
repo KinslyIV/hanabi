@@ -1,4 +1,5 @@
 import logging
+import threading
 import numpy as np
 from typing import Any, Dict, Optional
 
@@ -12,38 +13,67 @@ class MCTSBot(BaseBot):
         super().__init__(enable_hle=True)
         self.logger = logging.getLogger("rl_hanabi.mcts_bot")
         self.time_limit_ms = time_limit_ms
+        self._thinking = False
+        self._thinking_lock = threading.Lock()
 
     def make_move(self) -> None:
+        """Start MCTS computation in a background thread to avoid blocking WebSocket."""
         if not self.state or not self.state.hle_state:
             self.logger.error("Cannot make move: state or hle_state is missing")
             return
 
-        self.logger.info("It's my turn! Thinking...")
+        # Prevent multiple concurrent MCTS runs
+        with self._thinking_lock:
+            if self._thinking:
+                self.logger.warning("Already thinking, ignoring duplicate make_move call")
+                return
+            self._thinking = True
 
-        # Initialize MCTS
-        mcts = MCTS(model=None, device=None, time_ms=self.time_limit_ms)
+        self.logger.info("It's my turn! Starting MCTS in background thread...")
         
-        # Use a copy of the current HLE state as root
+        # Copy state data needed for MCTS before starting thread
         root_state = self.state.hle_state.copy()
-        print(f"Root state before MCTS:\n{root_state}\n")
-        mcts.init_root(root_state, c=1)
-        self.logger.info("Starting MCTS for %d ms...", self.time_limit_ms)
         
-        # Run MCTS
+        # Run MCTS in background thread to keep WebSocket alive
+        thread = threading.Thread(
+            target=self._run_mcts_and_send_move,
+            args=(root_state,),
+            daemon=True
+        )
+        thread.start()
+
+    def _run_mcts_and_send_move(self, root_state) -> None:
+        """Run MCTS computation and send the result. Called in background thread."""
         try:
-            prob_dist, q_value = mcts.run(use_rollouts=True)
+            # Initialize MCTS
+            mcts = MCTS(model=None, device=None, time_ms=self.time_limit_ms)
+            
+            print(f"Root state before MCTS:\n{root_state}\n")
+            mcts.init_root(root_state, c=1.4)
+            self.logger.info("Starting MCTS for %d ms...", self.time_limit_ms)
+            
+            # Run MCTS with reduced parameters to prevent timeout
+            prob_dist, q_value = mcts.run(
+                use_rollouts=True,
+                num_rollouts=1,
+                rollout_depth=30
+            )
+
+            # Select best move
+            best_move_index = np.argmax(prob_dist)
+            self.logger.info(f"Best move index: {best_move_index}")
+            best_move = root_state.index_to_move(int(best_move_index))
+            
+            self.logger.info(f"MCTS selected move: {best_move} with Q-value: {q_value:.4f}")
+            
+            # Send the move (thread-safe via send queue)
+            self._send_hanabi_move(best_move)
+            
         except Exception as e:
             self.logger.error(f"MCTS run failed: {e}", exc_info=True)
-            return
-
-        # Select best move
-        best_move_index = np.argmax(prob_dist)
-        self.logger.info(f"Best move index: {best_move_index}")
-        best_move = self.state.hle_state.index_to_move(int(best_move_index))
-        
-        self.logger.info(f"MCTS selected move: {best_move} with Q-value: {q_value:.4f}")
-        
-        self._send_hanabi_move(best_move)
+        finally:
+            with self._thinking_lock:
+                self._thinking = False
 
     def _send_hanabi_move(self, move: pyhanabi.HanabiMove) -> None:
         if not self.state:
