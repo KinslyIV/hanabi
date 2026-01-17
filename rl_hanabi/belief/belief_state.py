@@ -1,13 +1,16 @@
 import numpy as np
+import torch
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from rl_hanabi.game.hle_state import HLEGameState
+from rl_hanabi.model.belief_model import ActionDecoder
 from hanabi_learning_environment.pyhanabi import (
     HanabiCardKnowledge,
     HanabiCard,
     HanabiMoveType,
     HanabiHistoryItem,
 )
+
 
 # Standard Hanabi deck composition per color: three 1s, two 2s, two 3s, two 4s, one 5.
 # Ranks are 0-indexed (0=1, 1=2, ..., 4=5).
@@ -20,7 +23,7 @@ class BeliefState:
 
     """
 
-    def __init__(self, state: HLEGameState, player: int):
+    def __init__(self, state: HLEGameState, player: int, belief_model: Optional[ActionDecoder] = None):
         self.state = state
         self.player = player
         self.num_players = state.num_players
@@ -28,6 +31,7 @@ class BeliefState:
         self.num_colors = state.game.num_colors()
         self.hand_size = state.game.hand_size()
         self.num_players = state.num_players
+        self.belief_model = belief_model
         # Initialize belief arrays directly
         init_color = self.init_color_prob()
         init_rank = self.init_rank_prob()
@@ -372,6 +376,29 @@ class BeliefState:
         rotated_rank = np.roll(self.rank_belief, shift=-player_index, axis=0)
         return rotated_color, rotated_rank
 
+    def encode_clue_action(
+        self,
+        move_player_offset: int,
+        target_player_offset: int,
+        clue_type: int,
+        clue_value: int,
+    ) -> np.ndarray:
+        """
+        Encodes a clue action into a vector representation.
+        
+        Args:
+            move_player_offset: Offset of the player who gave the clue
+            target_player_offset: Offset of the player who received the clue
+            clue_type: 0 for Color, 1 for Rank
+            clue_value: The value of the clue (color index or rank index)
+        
+        Returns:
+            Action encoding as numpy array of shape (action_dim,)
+        """
+        # Simple encoding: [move_player_offset, target_player_offset, clue_type, clue_value]
+        # This matches action_dim=4 in ActionDecoder
+        return np.array([move_player_offset, target_player_offset, clue_type, clue_value], dtype=np.float32)
+
     def model_update(
         self,
         move_player_index: int,
@@ -381,8 +408,9 @@ class BeliefState:
         affected_indices: List[int],
     ):
         """
-        Placeholder for model-based belief update.
-        This function can be implemented to use a learned model to refine the belief state.
+        Model-based belief update using the ActionDecoder.
+        This function uses a learned model to refine the belief state based on observed actions.
+        
         Args:
             move_player_index: The index of the player who made the action.
             target_player_off: The offset to the target player who received the clue based on the move player index.
@@ -390,19 +418,67 @@ class BeliefState:
             clue_value: The value of the clue (color index or rank index)
             affected_indices: List of card indices in target player's hand that match the clue.
         """
+        # Skip if no belief model is provided
+        if self.belief_model is None:
+            return
+        
         target_player = (move_player_index + target_player_off) % self.num_players
-        affected_indices_one_hot = np.zeros(self.hand_size, dtype=bool)
-        affected_indices_one_hot[affected_indices] = True
-
+        
         # Run model for each player to update each of their beliefs of their own hand
         for p in range(self.num_players):
+            # Prepare observation from player p's perspective
             all_hands, fireworks, discard_pile_one_hot, tokens = self.prepare_belief_obs(p)
+            
+            # Calculate offsets from observer p's perspective
             move_player_offset = (move_player_index - p) % self.num_players
-            # Target player from observer p's perspective
             target_player_offset = (target_player - p) % self.num_players
-            clue_arr = np.array([move_player_offset, target_player_offset, clue_type, clue_value], dtype=np.int64)
+            
+            # Encode the action
+            action_encoding = self.encode_clue_action(
+                move_player_offset,
+                target_player_offset,
+                clue_type,
+                clue_value,
+            )
+            
+            # Create affected mask for all players/slots
+            affected_mask = np.zeros((self.num_players, self.hand_size), dtype=np.float32)
+            affected_mask[target_player_offset, affected_indices] = 1.0
+            
+            # Convert numpy arrays to torch tensors
+            slot_beliefs_tensor = torch.from_numpy(all_hands).float().unsqueeze(0)  # [1, P, H, C+R]
+            affected_mask_tensor = torch.from_numpy(affected_mask).float().unsqueeze(0)  # [1, P, H]
+            action_tensor = torch.from_numpy(action_encoding).float().unsqueeze(0)  # [1, action_dim]
+            fireworks_tensor = torch.from_numpy(fireworks).float().unsqueeze(0)  # [1, C]
+            discard_pile_tensor = torch.from_numpy(discard_pile_one_hot).float().unsqueeze(0)  # [1, C*R]
+            target_player_tensor = torch.tensor([target_player_offset], dtype=torch.long)
+            acting_player_tensor = torch.tensor([move_player_offset], dtype=torch.long)
 
-            # Run model to get likelihoods
+            # For each affected slot, run the model to get updated beliefs
+            with torch.no_grad():
+                    
+                # Run the belief model
+                color_logits, rank_logits = self.belief_model(
+                    slot_beliefs=slot_beliefs_tensor,
+                    affected_mask=affected_mask_tensor,
+                    move_target_player=target_player_tensor,
+                    acting_player=acting_player_tensor,
+                    action=action_tensor,
+                    fireworks=fireworks_tensor,
+                    discard_pile=discard_pile_tensor,
+                )
+                
+                # Convert logits to probabilities
+                color_probs = color_logits.squeeze(0).numpy()  # [hand_size, num_colors]
+                rank_probs = rank_logits.squeeze(0).numpy()  # [hand_size, num_ranks]
+
+                # Update beliefs for observer p about their own hand
+                self.update_from_action(
+                    observer=p,
+                    color_likelihoods=color_probs,
+                    rank_likelihoods=rank_probs,)
+                
+  
 
     def prepare_belief_obs(self, player_index: int):
         """
@@ -420,8 +496,7 @@ class BeliefState:
 
         color_rank_belief = np.concatenate([self.color_belief[player_index], self.rank_belief[player_index]], axis=-1)
         other_hands_obs = self.others_hand_to_observation(player_index)
-        other_hands_obs.insert(0, color_rank_belief)
-        all_hands = np.array(other_hands_obs)  # Shape: (num_players, hand_size, num_colors + num_ranks)
+        all_hands = np.array([color_rank_belief] + other_hands_obs)  # Shape: (num_players, hand_size, num_colors + num_ranks)
         fireworks = np.array(self.state.fireworks())
         discard_pile = self.cards_to_indices(self.state.discard_pile())
         discard_pile_one_hot = np.zeros(self.num_colors * self.num_ranks, dtype=float)

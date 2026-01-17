@@ -390,7 +390,7 @@ class MCTS:
                 policy, value  = self.model(
                     torch.tensor(HLEGameState.encode_state(expanded.state, expanded.current_player), 
                                 dtype=torch.float32, device=self.device).unsqueeze(0))
-                policy = torch.softmax(policy, axis=1).squeeze(0).cpu().numpy() # type: ignore
+                policy = torch.softmax(policy, dim=1).squeeze(0).cpu().numpy() # type: ignore
                 value = value.item()
 
             expanded.set_prob_dist(policy)

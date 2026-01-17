@@ -220,7 +220,7 @@ class HLEGameState:
 
     def legal_moves_mask(self) -> np.ndarray:
         """Get a binary mask of legal moves over the full action space."""
-        mask = np.zeros(self.action_space_size, dtype=np.bool)
+        mask = np.zeros(self.action_space_size, dtype=bool)
         for move in self.state.legal_moves():
             mask[self.move_to_index(move)] = True
         return mask
