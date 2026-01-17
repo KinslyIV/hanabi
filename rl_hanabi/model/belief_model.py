@@ -4,10 +4,10 @@ from torch import nn
 class ActionDecoder(nn.Module):
 
     def __init__(self, 
-                 num_colors: int, 
-                 num_ranks: int, 
-                 hand_size: int, 
-                 num_players: int,
+                 max_num_colors: int, 
+                 max_num_ranks: int, 
+                 max_hand_size: int, 
+                 max_num_players: int,
                  num_heads: int = 4,
                  num_layers: int = 4,
                  d_model: int = 128,
@@ -15,19 +15,18 @@ class ActionDecoder(nn.Module):
 
         super().__init__()
 
-        self.slot_belief_proj = nn.Sequential(
-            nn.Linear(num_colors + num_ranks, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, d_model),
-        )
+        self.slot_belief_proj = nn.Linear(max_num_colors + max_num_ranks, d_model)
         self.act_proj  = nn.Linear(action_dim, d_model)
-        self.firework_proj = nn.Linear(num_colors, d_model)
-        self.discard_pile_proj = nn.Linear(num_colors * num_ranks, d_model)
+        self.firework_proj = nn.Linear(max_num_colors, d_model)
+        self.discard_pile_proj = nn.Linear(max_num_colors * max_num_ranks, d_model)
 
-        self.slot_emb  = nn.Embedding(hand_size, d_model)
-        self.player_emb = nn.Embedding(num_players, d_model)
+        self.slot_emb  = nn.Embedding(max_hand_size, d_model)
+        self.player_emb = nn.Embedding(max_num_players, d_model)
         self.move_target_player_emb = nn.Embedding(1, d_model) 
         self.affected_emb = nn.Embedding(2, d_model) # 0: unaffected, 1: affected
+
+        self.state_token = nn.Parameter(torch.randn(1, 1, d_model))
+
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -40,8 +39,18 @@ class ActionDecoder(nn.Module):
             encoder_layer, num_layers
         )
         
-        self.color_head = nn.Linear(d_model, num_colors)
-        self.rank_head  = nn.Linear(d_model, num_ranks)
+        self.color_head = nn.Linear(d_model, max_num_colors)
+        self.rank_head  = nn.Linear(d_model, max_num_ranks)
+
+        action_space_size = 2 * max_hand_size + (max_num_players - 1) * max_num_colors + (max_num_players - 1) * max_num_ranks
+
+        self.action_head = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, action_space_size),
+        )
 
 
     def forward(self,
@@ -107,12 +116,14 @@ class ActionDecoder(nn.Module):
             self.firework_proj(fireworks),
             self.discard_pile_proj(discard_pile)], dim=1)   # [B, 4, d_model]
 
-        x = torch.cat([x, global_tokens], dim=1)        # [B, P*H + 4, d_model]
+        x = torch.cat([x, global_tokens], dim=1)            # [B, P*H + 4, d_model]
+        state_token = self.state_token.expand(B, -1, -1)
+        x = torch.cat([x, state_token], dim=1)              # [B, P*H + 5, d_model]
 
         # --------------------------------------------------
         # 7. Transformer
         # --------------------------------------------------
-        x = self.transformer(x)                              # [B, P*H + 4, d_model]
+        x = self.transformer(x)                              # [B, P*H + 5, d_model]
 
         # --------------------------------------------------
         # 8. Decode first hand's slots
@@ -125,4 +136,7 @@ class ActionDecoder(nn.Module):
         color_logits = self.color_head(hand_repr)          # [B, num_colors]
         rank_logits  = self.rank_head(hand_repr)           # [B, num_ranks]
 
-        return color_logits, rank_logits
+        global_repr = x[:, -1]
+        action_logits = self.action_head(global_repr)     # [B, action_space_size]
+
+        return color_logits, rank_logits, action_logits
