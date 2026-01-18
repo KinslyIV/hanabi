@@ -256,18 +256,28 @@ class BeliefState:
                 target_player_off,
             )
 
-            self.model_update(
-                player_index,
-                target_player_off,
-                clue_type,
-                clue_value,
-                affected_indices,
-            )
+            action_probs = self.model_update(player_index,
+                                            target_player_off,
+                                            clue_type,
+                                            clue_value,
+                                            affected_indices,)
+            
+            return action_probs
 
         elif move_type == HanabiMoveType.PLAY or move_type == HanabiMoveType.DISCARD:
             color, rank = last_history_item.color(), last_history_item.rank()
             hand_card_index = last_move.card_index()
+            action_type = 2 if move_type == HanabiMoveType.PLAY else 3
+            value = last_history_item.scored() if move_type == HanabiMoveType.PLAY else 0
             self.update_from_draw(player_index)
+
+            action_probs = self.model_update(player_index,
+                                            target_player_off=0,
+                                            clue_type=action_type,
+                                            clue_value=value,
+                                            affected_indices=[hand_card_index],)
+
+            return action_probs
 
         self.apply_card_count_correction()
 
@@ -423,6 +433,8 @@ class BeliefState:
             return
         
         target_player = (move_player_index + target_player_off) % self.num_players
+
+        action_probs = None
         
         # Run model for each player to update each of their beliefs of their own hand
         for p in range(self.num_players):
@@ -458,7 +470,7 @@ class BeliefState:
             with torch.no_grad():
                     
                 # Run the belief model
-                color_logits, rank_logits = self.belief_model(
+                color_logits, rank_logits, action_logits = self.belief_model(
                     slot_beliefs=slot_beliefs_tensor,
                     affected_mask=affected_mask_tensor,
                     move_target_player=target_player_tensor,
@@ -471,12 +483,23 @@ class BeliefState:
                 # Convert logits to probabilities
                 color_probs = color_logits.squeeze(0).numpy()  # [hand_size, num_colors]
                 rank_probs = rank_logits.squeeze(0).numpy()  # [hand_size, num_ranks]
+                action_logits = action_logits.squeeze(0)  # [action_space_size]
 
                 # Update beliefs for observer p about their own hand
                 self.update_from_action(
                     observer=p,
                     color_likelihoods=color_probs,
                     rank_likelihoods=rank_probs,)
+                
+
+                if p == self.player:
+                    move_mask = torch.tensor(self.state.legal_moves_mask())
+                    action_logits = action_logits[:move_mask.shape[0]] 
+                    action_logits[move_mask] = 0.0 
+                    action_probs = torch.softmax(action_logits, dim=0).cpu().numpy()
+
+        return action_probs
+                
                 
   
 
