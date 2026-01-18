@@ -24,28 +24,14 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
+from rl_hanabi.training.distributed.protocol import TrainingRequest, TrainingResponse
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('gpu_server')
-
-
-@dataclass
-class TrainingRequest:
-    """Request from coordinator to perform a training step."""
-    request_type: str  # 'train_step', 'get_weights', 'set_weights', 'ping', 'save_checkpoint', 'load_checkpoint'
-    payload: Optional[Dict[str, Any]] = None
-
-
-@dataclass
-class TrainingResponse:
-    """Response to coordinator after completing request."""
-    success: bool
-    response_type: str
-    payload: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
 
 
 class GPUTrainer:
@@ -339,7 +325,11 @@ class GPUServer:
                 reader.readexactly(length),
                 timeout=300
             )
-            return pickle.loads(data)
+            request = pickle.loads(data)
+            # Handle dict requests from clients (convert to TrainingRequest)
+            if isinstance(request, dict):
+                request = TrainingRequest.model_validate(request)
+            return request
         except asyncio.TimeoutError:
             logger.warning("Request timeout")
             return None

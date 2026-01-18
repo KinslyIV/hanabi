@@ -16,7 +16,17 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
+from rl_hanabi.training.distributed.protocol import TrainingRequest, TrainingResponse
+
 logger = logging.getLogger('gpu_client')
+
+
+def _deserialize_response(data: bytes) -> TrainingResponse:
+    """Deserialize a response, handling both Pydantic models and dicts."""
+    obj = pickle.loads(data)
+    if isinstance(obj, dict):
+        return TrainingResponse.model_validate(obj)
+    return obj
 
 
 class ConnectionState(Enum):
@@ -140,11 +150,11 @@ class GPUClient:
             # Authenticate if needed
             if self.config.auth_token:
                 self.state = ConnectionState.AUTHENTICATING
-                auth_request = {'request_type': 'auth', 'payload': {'token': self.config.auth_token}}
+                auth_request = TrainingRequest(request_type='auth', payload={'token': self.config.auth_token})
                 await self._send(pickle.dumps(auth_request))
                 
                 response_data = await self._recv(self.config.connection_timeout)
-                response = pickle.loads(response_data)
+                response = _deserialize_response(response_data)
                 
                 if not response.success:
                     raise ConnectionError(f"Authentication failed: {response.error}")
@@ -321,13 +331,13 @@ class GPUClient:
                 if not connected:
                     raise ConnectionError("Not connected and connection timeout")
             
-            request = {'request_type': request_type, 'payload': payload}
+            request = TrainingRequest(request_type=request_type, payload=payload)
             start_time = time.time()
             
             try:
                 await self._send(pickle.dumps(request))
                 response_data = await self._recv(timeout)
-                response = pickle.loads(response_data)
+                response = _deserialize_response(response_data)
                 
                 self.stats.requests_sent += 1
                 self.stats.total_latency += time.time() - start_time
