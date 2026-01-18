@@ -61,6 +61,8 @@ class TrainingState:
         self.best_avg_score = 0.0
         self.paused = False
         self.pause_reason = ""
+        self.completed = False  # True when training finished all iterations
+        self.target_iterations = 0  # Number of iterations this training was started with
         
         self._load()
     
@@ -75,8 +77,10 @@ class TrainingState:
                     self.total_train_steps = data.get('total_train_steps', 0)
                     self.simulation_config = data.get('simulation_config', {})
                     self.best_avg_score = data.get('best_avg_score', 0.0)
+                    self.completed = data.get('completed', False)
+                    self.target_iterations = data.get('target_iterations', 0)
                     logger.info(f"Loaded training state: iteration={self.iteration}, "
-                              f"total_games={self.total_games}")
+                              f"total_games={self.total_games}, completed={self.completed}")
             except Exception as e:
                 logger.warning(f"Failed to load training state: {e}")
     
@@ -88,9 +92,37 @@ class TrainingState:
             'total_train_steps': self.total_train_steps,
             'simulation_config': self.simulation_config,
             'best_avg_score': self.best_avg_score,
+            'completed': self.completed,
+            'target_iterations': self.target_iterations,
         }
         with open(self.state_file, 'w') as f:
             json.dump(data, f, indent=2)
+    
+    def reset(self) -> None:
+        """Reset training state for a fresh start."""
+        logger.info("Resetting training state for fresh start")
+        self.iteration = 0
+        self.total_games = 0
+        self.total_train_steps = 0
+        self.simulation_config = {}
+        self.best_avg_score = 0.0
+        self.completed = False
+        self.target_iterations = 0
+        self.save()
+    
+    def mark_completed(self) -> None:
+        """Mark training as completed."""
+        self.completed = True
+        self.save()
+        logger.info("Training marked as completed")
+    
+    def should_resume(self) -> bool:
+        """Check if we should resume from this state or start fresh."""
+        # If completed, don't resume - start fresh
+        if self.completed:
+            return False
+        # If we have progress but not completed, resume
+        return self.iteration > 0
 
 
 def game_worker(
@@ -520,8 +552,14 @@ class DistributedCoordinator:
                 logger.error("Could not connect to GPU server")
                 return
         
+        # Track target iterations for completion detection
+        self.state.target_iterations = num_iterations
+        self.state.completed = False
+        self.state.save()
+        
         logger.info(f"Starting training from iteration {self.state.iteration + 1}")
         
+        training_completed_normally = False
         try:
             while self.state.iteration < num_iterations and not self._shutdown_event.is_set():
                 result = await self.run_iteration(
@@ -537,6 +575,10 @@ class DistributedCoordinator:
                     logger.warning(f"Iteration failed: {result.get('error')}")
                     # Wait before retry
                     await asyncio.sleep(5)
+            
+            # Check if we completed all iterations (not interrupted)
+            if self.state.iteration >= num_iterations:
+                training_completed_normally = True
         
         except asyncio.CancelledError:
             logger.info("Training cancelled")
@@ -548,6 +590,13 @@ class DistributedCoordinator:
             except Exception as e:
                 logger.error(f"Failed to save final checkpoint: {e}")
             
+            # Mark as completed only if we finished all iterations
+            if training_completed_normally:
+                self.state.mark_completed()
+                logger.info("Training completed all iterations!")
+            else:
+                logger.info("Training interrupted - can be resumed")
+            
             await self.gpu_client.disconnect()
         
         logger.info("Training complete!")
@@ -556,6 +605,26 @@ class DistributedCoordinator:
         """Signal shutdown."""
         logger.info("Shutting down coordinator...")
         self._shutdown_event.set()
+    
+    async def stop_all(self, shutdown_gpu_server: bool = False) -> None:
+        """
+        Stop all training operations: simulations, coordinator, and GPU server.
+        
+        Args:
+            shutdown_gpu_server: If True, also shuts down the GPU server process.
+        """
+        logger.info("Stopping all training operations...")
+        
+        # Signal coordinator shutdown (stops simulation workers)
+        self._shutdown_event.set()
+        
+        # Stop training on GPU server
+        try:
+            await self.gpu_client.stop_training(shutdown_server=shutdown_gpu_server)
+        except Exception as e:
+            logger.warning(f"Error stopping GPU training: {e}")
+        
+        logger.info("All training operations stopped")
 
 
 async def run_distributed_training(args: argparse.Namespace) -> None:
@@ -574,6 +643,32 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
     
     # Load or create training state
     state = TrainingState(state_file)
+    
+    # Determine if we should start fresh or resume
+    should_reset_state = False
+    should_reset_model = False
+    pretrained_model_path = getattr(args, 'pretrained_model', None)
+    fresh_start = getattr(args, 'fresh', False)
+    
+    if fresh_start:
+        # User explicitly requested fresh start
+        logger.info("Fresh start requested via --fresh flag")
+        should_reset_state = True
+        should_reset_model = not pretrained_model_path  # Reset model unless using pretrained
+    elif state.completed:
+        # Previous training completed - start fresh
+        logger.info("Previous training completed - starting fresh")
+        should_reset_state = True
+        should_reset_model = not pretrained_model_path
+    elif state.should_resume():
+        # Previous training was interrupted - resume
+        logger.info(f"Resuming interrupted training from iteration {state.iteration}")
+    else:
+        # No previous state - fresh start
+        logger.info("No previous training state - starting fresh")
+    
+    if should_reset_state:
+        state.reset()
     
     # Model configuration
     model_config = {
@@ -673,12 +768,38 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
     # Setup signal handlers
     loop = asyncio.get_event_loop()
     
-    def signal_handler(sig, frame):
-        logger.info(f"Received signal {sig}")
-        loop.create_task(coordinator.shutdown())
+    shutdown_requested = False
     
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    def graceful_shutdown(sig, frame):
+        nonlocal shutdown_requested
+        sig_name = signal.Signals(sig).name
+        if shutdown_requested:
+            logger.warning(f"Received {sig_name} again, forcing immediate exit")
+            sys.exit(1)
+        logger.info(f"Received {sig_name}, initiating graceful shutdown...")
+        shutdown_requested = True
+        loop.create_task(coordinator.stop_all(shutdown_gpu_server=False))
+    
+    async def save_checkpoint_handler_async():
+        try:
+            filename = f"checkpoint_signal_{coordinator.state.iteration}.pt"
+            await coordinator.gpu_client.save_checkpoint(filename)
+            logger.info(f"Signal-triggered checkpoint saved: {filename}")
+        except Exception as e:
+            logger.error(f"Failed to save signal-triggered checkpoint: {e}")
+    
+    def save_checkpoint_handler(sig, frame):
+        sig_name = signal.Signals(sig).name
+        logger.info(f"Received {sig_name}, saving checkpoint...")
+        loop.create_task(save_checkpoint_handler_async())
+    
+    signal.signal(signal.SIGINT, graceful_shutdown)
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+    signal.signal(signal.SIGUSR1, save_checkpoint_handler)  # Save checkpoint without stopping
+    
+    logger.info("Signal handlers registered:")
+    logger.info("  SIGINT/SIGTERM (Ctrl+C): Graceful shutdown with checkpoint")
+    logger.info("  SIGUSR1: Save checkpoint without stopping")
     
     # Run training
     try:
@@ -708,6 +829,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint directory")
     parser.add_argument("--buffer-dir", type=str, default=None, help="Buffer save directory")
+    
+    # Resume/Fresh start control
+    parser.add_argument("--fresh", action="store_true", 
+                       help="Force fresh start (ignore previous training state)")
+    parser.add_argument("--pretrained-model", type=str, default=None,
+                       help="Path to pretrained model checkpoint to start from (resets training stats but keeps model weights)")
     
     # Model architecture (must match GPU server)
     parser.add_argument("--max-players", type=int, default=5, help="Maximum players")

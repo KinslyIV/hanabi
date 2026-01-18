@@ -388,3 +388,19 @@ class GPUClient:
     async def get_stats(self) -> Dict[str, Any]:
         """Get server statistics."""
         return await self._request('get_stats')
+    
+    async def stop_training(self, shutdown_server: bool = False) -> None:
+        """
+        Request to stop all training operations.
+        
+        Args:
+            shutdown_server: If True, also shuts down the GPU server process.
+                             If False, just stops training but keeps the server running.
+        """
+        try:
+            await self._request('stop_training', {'shutdown_server': shutdown_server})
+        except Exception as e:
+            logger.warning(f"Error sending stop_training request: {e}")
+        finally:
+            # Always disconnect the client after stopping training
+            await self.disconnect()

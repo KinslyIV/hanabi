@@ -273,6 +273,51 @@ class GPUTrainer:
         state = torch.load(filepath, map_location=self.device)
         self.load_state_dict(state)
         logger.info(f"Loaded checkpoint from {filepath}")
+    
+    def load_model_weights_only(self, filepath: Path) -> None:
+        """Load only model weights from checkpoint (for transfer learning/pretrained models)."""
+        state = torch.load(filepath, map_location=self.device)
+        if "model_state_dict" in state:
+            self.model.load_state_dict(state["model_state_dict"])
+        else:
+            # Assume it's just model weights
+            self.model.load_state_dict(state)
+        self.model.to(self.device)
+        # Reset training state for fresh start with pretrained weights
+        self.global_step = 0
+        self.epoch = 0
+        self.best_loss = float('inf')
+        logger.info(f"Loaded pretrained model weights from {filepath} (optimizer/scheduler reset)")
+    
+    def find_latest_checkpoint(self) -> Optional[Path]:
+        """Find the most recent checkpoint in the checkpoint directory."""
+        if not self.checkpoint_dir or not self.checkpoint_dir.exists():
+            return None
+        
+        # Look for checkpoint files
+        checkpoints = list(self.checkpoint_dir.glob("checkpoint_*.pt"))
+        if not checkpoints:
+            return None
+        
+        # Prefer checkpoint_latest.pt if it exists
+        latest = self.checkpoint_dir / "checkpoint_latest.pt"
+        if latest.exists():
+            return latest
+        
+        # Otherwise find most recent by modification time
+        return max(checkpoints, key=lambda p: p.stat().st_mtime)
+    
+    def auto_resume(self) -> bool:
+        """Attempt to auto-resume from the latest checkpoint. Returns True if resumed."""
+        latest = self.find_latest_checkpoint()
+        if latest:
+            try:
+                self.load_checkpoint(latest)
+                logger.info(f"Auto-resumed from {latest} at step {self.global_step}")
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to auto-resume from {latest}: {e}")
+        return False
 
 
 class GPUServer:
@@ -445,6 +490,29 @@ class GPUServer:
                     }
                 )
             
+            elif request.request_type == 'stop_training':
+                shutdown_server = request.payload.get('shutdown_server', False) if request.payload else False
+                logger.info(f"Stop training request received (shutdown_server={shutdown_server})")
+                self._shutdown_event.set()
+                
+                # Save a final checkpoint before stopping
+                try:
+                    if self.trainer.checkpoint_dir:
+                        self.trainer.save_checkpoint('checkpoint_final.pt')
+                        logger.info("Saved final checkpoint before shutdown")
+                except Exception as e:
+                    logger.warning(f"Failed to save final checkpoint: {e}")
+                
+                return TrainingResponse(
+                    success=True,
+                    response_type='training_stopped',
+                    payload={
+                        'message': 'Training stopped and server shutting down' if shutdown_server else 'Training stopped',
+                        'shutdown_server': shutdown_server,
+                        'final_step': self.trainer.global_step,
+                    }
+                )
+            
             else:
                 return TrainingResponse(
                     success=False,
@@ -541,10 +609,19 @@ class GPUServer:
         async with self.server:
             await self.server.serve_forever()
     
-    async def stop(self) -> None:
+    async def stop(self, save_checkpoint: bool = True) -> None:
         """Stop the server gracefully."""
         logger.info("Shutting down GPU Server...")
         self._shutdown_event.set()
+        
+        # Save final checkpoint
+        if save_checkpoint:
+            try:
+                if self.trainer.checkpoint_dir:
+                    self.trainer.save_checkpoint('checkpoint_final.pt')
+                    logger.info(f"Saved final checkpoint at step {self.trainer.global_step}")
+            except Exception as e:
+                logger.error(f"Failed to save final checkpoint: {e}")
         
         # Close all active connections
         for writer in list(self._active_connections):
@@ -555,6 +632,15 @@ class GPUServer:
             await self.server.wait_closed()
         
         logger.info("GPU Server shutdown complete")
+    
+    async def save_checkpoint_now(self, filename: str = 'checkpoint_signal.pt') -> None:
+        """Save a checkpoint immediately (can be triggered by signal)."""
+        try:
+            if self.trainer.checkpoint_dir:
+                self.trainer.save_checkpoint(filename)
+                logger.info(f"Signal-triggered checkpoint saved at step {self.trainer.global_step}")
+        except Exception as e:
+            logger.error(f"Failed to save signal-triggered checkpoint: {e}")
 
 
 def main():
@@ -591,7 +677,14 @@ def main():
     
     # Checkpoint settings
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint directory")
-    parser.add_argument("--load-checkpoint", type=str, default=None, help="Checkpoint to load")
+    parser.add_argument("--load-checkpoint", type=str, default=None, 
+                       help="Specific checkpoint to load (full state including optimizer)")
+    parser.add_argument("--pretrained-model", type=str, default=None,
+                       help="Path to pretrained model (loads weights only, resets optimizer/scheduler)")
+    parser.add_argument("--auto-resume", action="store_true", default=True,
+                       help="Automatically resume from latest checkpoint if available (default: True)")
+    parser.add_argument("--no-auto-resume", action="store_false", dest="auto_resume",
+                       help="Disable auto-resume, start with fresh model")
     
     args = parser.parse_args()
     
@@ -638,9 +731,23 @@ def main():
         checkpoint_dir=Path(args.checkpoint_dir),
     )
     
-    # Load checkpoint if specified
+    # Checkpoint loading priority:
+    # 1. Explicit --load-checkpoint (full state)
+    # 2. Explicit --pretrained-model (weights only, reset optimizer)
+    # 3. Auto-resume from latest checkpoint (if enabled)
+    # 4. Fresh start
+    
     if args.load_checkpoint:
+        logger.info(f"Loading explicit checkpoint: {args.load_checkpoint}")
         trainer.load_checkpoint(Path(args.load_checkpoint))
+    elif args.pretrained_model:
+        logger.info(f"Loading pretrained model weights: {args.pretrained_model}")
+        trainer.load_model_weights_only(Path(args.pretrained_model))
+    elif args.auto_resume:
+        if not trainer.auto_resume():
+            logger.info("No checkpoint found for auto-resume, starting fresh")
+    else:
+        logger.info("Auto-resume disabled, starting with fresh model")
     
     # Create and run server
     server = GPUServer(
@@ -654,12 +761,30 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    def signal_handler(sig, frame):
-        logger.info(f"Received signal {sig}")
-        loop.create_task(server.stop())
+    shutdown_requested = False
     
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    def graceful_shutdown(sig, frame):
+        nonlocal shutdown_requested
+        sig_name = signal.Signals(sig).name
+        if shutdown_requested:
+            logger.warning(f"Received {sig_name} again, forcing immediate exit")
+            sys.exit(1)
+        logger.info(f"Received {sig_name}, initiating graceful shutdown...")
+        shutdown_requested = True
+        loop.call_soon_threadsafe(lambda: loop.create_task(server.stop(save_checkpoint=True)))
+    
+    def save_checkpoint_handler(sig, frame):
+        sig_name = signal.Signals(sig).name
+        logger.info(f"Received {sig_name}, saving checkpoint...")
+        loop.call_soon_threadsafe(lambda: loop.create_task(server.save_checkpoint_now()))
+    
+    signal.signal(signal.SIGINT, graceful_shutdown)
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+    signal.signal(signal.SIGUSR1, save_checkpoint_handler)  # Save checkpoint without stopping
+    
+    logger.info("Signal handlers registered:")
+    logger.info("  SIGINT/SIGTERM (Ctrl+C): Graceful shutdown with checkpoint")
+    logger.info("  SIGUSR1: Save checkpoint without stopping")
     
     try:
         loop.run_until_complete(server.start())
