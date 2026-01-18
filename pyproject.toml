@@ -16,6 +16,7 @@ dependencies = [
     "shimmy>=2.0.0",
     "stable-baselines3>=2.7.0",
     "supersuit>=3.10.0",
+    "tomli>=2.4.0",
     "torch>=2.9.1",
     "wandb>=0.24.0",
     "websocket-client>=1.9.0",
