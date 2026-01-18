@@ -75,7 +75,7 @@ def print_local_status(checkpoint_dir: str = "checkpoints") -> None:
 async def print_gpu_status(
     host: str,
     port: int = 5555,
-    auth_token: str = None,
+    auth_token: str | None = None,
 ) -> None:
     """Connect to GPU server and print status."""
     print("\n" + "="*50)
@@ -139,7 +139,7 @@ async def print_gpu_status(
 async def continuous_monitor(
     host: str,
     port: int = 5555,
-    auth_token: str = None,
+    auth_token: str | None = None,
     interval: float = 5.0,
 ) -> None:
     """Continuously monitor the GPU server."""
