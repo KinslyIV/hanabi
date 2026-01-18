@@ -399,6 +399,35 @@ class GPUClient:
         """
         return await self._request('load_pretrained_model', {'filepath': filepath})
     
+    async def initialize_training(
+        self, 
+        mode: str = 'resume',
+        pretrained_path: Optional[str] = None,
+        delete_checkpoints: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Initialize the GPU server's training state.
+        
+        Args:
+            mode: One of:
+                - 'resume': Resume from latest checkpoint if available
+                - 'fresh': Reset to fresh random weights
+                - 'pretrained': Load weights from pretrained model (resets optimizer)
+            pretrained_path: Path to pretrained model (required if mode='pretrained')
+            delete_checkpoints: If True and mode='fresh', delete all saved checkpoints
+        
+        Returns:
+            Dict with initialization result including 'mode', 'global_step', 'message'
+        """
+        payload = {
+            'mode': mode,
+            'delete_checkpoints': delete_checkpoints,
+        }
+        if pretrained_path:
+            payload['pretrained_path'] = pretrained_path
+        
+        return await self._request('initialize_training', payload)
+    
     async def get_stats(self) -> Dict[str, Any]:
         """Get server statistics."""
         return await self._request('get_stats')

@@ -533,13 +533,19 @@ class DistributedCoordinator:
         game_config_ranges: Dict[str, Tuple[int, int]],
         save_interval: int = 10,
         log_interval: int = 100,
+        init_mode: str = 'resume',
         pretrained_model_path: Optional[str] = None,
+        delete_checkpoints: bool = False,
     ) -> None:
         """Run the full training loop.
         
         Args:
-            pretrained_model_path: If provided, load this model's weights before training
-                                   (resets optimizer/scheduler for fresh training).
+            init_mode: How to initialize the GPU server's model:
+                - 'resume': Resume from latest checkpoint if available
+                - 'fresh': Reset to fresh random weights
+                - 'pretrained': Load weights from pretrained model
+            pretrained_model_path: Path to pretrained model (required if init_mode='pretrained')
+            delete_checkpoints: If True and init_mode='fresh', delete all saved checkpoints
         """
         
         # Setup GPU client callbacks
@@ -558,18 +564,18 @@ class DistributedCoordinator:
                 logger.error("Could not connect to GPU server")
                 return
         
-        # Load pretrained model if specified
-        if pretrained_model_path:
-            logger.info(f"Attempting to load pretrained model from: {pretrained_model_path}")
-            try:
-                result = await self.gpu_client.load_pretrained_model(pretrained_model_path)
-                if result.get('loaded', False):
-                    logger.info("Pretrained model loaded successfully")
-                else:
-                    logger.info("Pretrained model not found, initialized fresh model")
-            except Exception as e:
-                logger.error(f"Failed to load pretrained model: {e}")
-                return
+        # Initialize training on GPU server
+        logger.info(f"Initializing GPU server training (mode={init_mode})")
+        try:
+            result = await self.gpu_client.initialize_training(
+                mode=init_mode,
+                pretrained_path=pretrained_model_path,
+                delete_checkpoints=delete_checkpoints,
+            )
+            logger.info(f"GPU server initialized: {result.get('message', 'OK')}")
+        except Exception as e:
+            logger.error(f"Failed to initialize GPU server: {e}")
+            return
         
         # Track target iterations for completion detection
         self.state.target_iterations = num_iterations
@@ -663,28 +669,42 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
     # Load or create training state
     state = TrainingState(state_file)
     
-    # Determine if we should start fresh or resume
-    should_reset_state = False
-    should_reset_model = False
+    # Determine initialization mode for GPU server
     pretrained_model_path = getattr(args, 'pretrained_model', None)
     fresh_start = getattr(args, 'fresh', False)
+    delete_checkpoints = getattr(args, 'delete_checkpoints', False)
+    
+    # Determine init_mode and whether to reset coordinator state
+    should_reset_state = False
+    init_mode = 'resume'  # Default: try to resume
     
     if fresh_start:
         # User explicitly requested fresh start
         logger.info("Fresh start requested via --fresh flag")
         should_reset_state = True
-        should_reset_model = not pretrained_model_path  # Reset model unless using pretrained
+        if pretrained_model_path:
+            init_mode = 'pretrained'
+        else:
+            init_mode = 'fresh'
     elif state.completed:
         # Previous training completed - start fresh
         logger.info("Previous training completed - starting fresh")
         should_reset_state = True
-        should_reset_model = not pretrained_model_path
+        if pretrained_model_path:
+            init_mode = 'pretrained'
+        else:
+            init_mode = 'fresh'
     elif state.should_resume():
         # Previous training was interrupted - resume
         logger.info(f"Resuming interrupted training from iteration {state.iteration}")
+        init_mode = 'resume'
     else:
-        # No previous state - fresh start
-        logger.info("No previous training state - starting fresh")
+        # No previous state - check if user wants pretrained or fresh
+        logger.info("No previous training state")
+        if pretrained_model_path:
+            init_mode = 'pretrained'
+        else:
+            init_mode = 'resume'  # Will use whatever GPU server has
     
     if should_reset_state:
         state.reset()
@@ -830,7 +850,9 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
             game_config_ranges=game_config_ranges,
             save_interval=args.save_interval,
             log_interval=args.log_interval,
-            pretrained_model_path=pretrained_model_path if should_reset_state else None,
+            init_mode=init_mode,
+            pretrained_model_path=pretrained_model_path,
+            delete_checkpoints=delete_checkpoints,
         )
     finally:
         if args.use_wandb and HAS_WANDB:
@@ -855,6 +877,8 @@ def main():
                        help="Force fresh start (ignore previous training state)")
     parser.add_argument("--pretrained-model", type=str, default=None,
                        help="Path to pretrained model checkpoint to start from (resets training stats but keeps model weights)")
+    parser.add_argument("--delete-checkpoints", action="store_true",
+                       help="Delete all saved checkpoints when starting fresh (use with --fresh)")
     
     # Model architecture (must match GPU server)
     parser.add_argument("--max-players", type=int, default=5, help="Maximum players")

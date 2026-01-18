@@ -338,6 +338,67 @@ class GPUTrainer:
             except Exception as e:
                 logger.warning(f"Failed to auto-resume from {latest}: {e}")
         return False
+    
+    def reset_model(self, delete_checkpoints: bool = False) -> None:
+        """Reset the model to fresh random weights.
+        
+        Args:
+            delete_checkpoints: If True, also delete all checkpoint files.
+        """
+        # Re-initialize model weights
+        from rl_hanabi.model.belief_model import ActionDecoder
+        
+        self.model = ActionDecoder(
+            max_num_colors=self.model_config["max_num_colors"],
+            max_num_ranks=self.model_config["max_num_ranks"],
+            max_hand_size=self.model_config["max_hand_size"],
+            max_num_players=self.model_config["max_num_players"],
+            num_heads=self.model_config.get("num_heads", 4),
+            num_layers=self.model_config.get("num_layers", 4),
+            d_model=self.model_config.get("d_model", 128),
+            action_dim=self.model_config.get("action_dim", 4),
+        )
+        self.model.to(self.device)
+        
+        # Re-initialize optimizer with new model parameters
+        self.optimizer = AdamW(
+            self.model.parameters(),
+            lr=self.training_config.get("learning_rate", 1e-4),
+            weight_decay=self.training_config.get("weight_decay", 0.01),
+            betas=(0.9, 0.999),
+        )
+        
+        # Re-initialize scheduler
+        self.scheduler = CosineAnnealingWarmRestarts(
+            self.optimizer,
+            T_0=self.training_config.get("scheduler_t0", 1000),
+            T_mult=self.training_config.get("scheduler_t_mult", 2),
+            eta_min=self.training_config.get("min_lr", 1e-6),
+        )
+        
+        # Reset training state
+        self.global_step = 0
+        self.epoch = 0
+        self.best_loss = float('inf')
+        
+        # Delete checkpoints if requested
+        if delete_checkpoints and self.checkpoint_dir and self.checkpoint_dir.exists():
+            for checkpoint_file in self.checkpoint_dir.glob("checkpoint_*.pt"):
+                try:
+                    checkpoint_file.unlink()
+                    logger.info(f"Deleted checkpoint: {checkpoint_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete {checkpoint_file}: {e}")
+            # Also delete best_model.pt if it exists
+            best_model = self.checkpoint_dir / "best_model.pt"
+            if best_model.exists():
+                try:
+                    best_model.unlink()
+                    logger.info(f"Deleted best model: {best_model}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete {best_model}: {e}")
+        
+        logger.info("Model reset to fresh random weights")
 
 
 class GPUServer:
@@ -528,6 +589,60 @@ class GPUServer:
                         'device': str(self.trainer.device),
                     }
                 )
+            
+            elif request.request_type == 'initialize_training':
+                # Coordinator tells GPU server how to initialize
+                # mode: 'resume' | 'fresh' | 'pretrained'
+                mode = request.payload.get('mode', 'resume') if request.payload else 'resume'
+                pretrained_path = request.payload.get('pretrained_path') if request.payload else None
+                delete_checkpoints = request.payload.get('delete_checkpoints', False) if request.payload else False
+                
+                if mode == 'fresh':
+                    logger.info(f"Initializing fresh model (delete_checkpoints={delete_checkpoints})")
+                    self.trainer.reset_model(delete_checkpoints=delete_checkpoints)
+                    return TrainingResponse(
+                        success=True,
+                        response_type='training_initialized',
+                        payload={
+                            'mode': 'fresh',
+                            'global_step': self.trainer.global_step,
+                            'message': 'Initialized with fresh random weights'
+                        }
+                    )
+                
+                elif mode == 'pretrained':
+                    if not pretrained_path:
+                        return TrainingResponse(
+                            success=False,
+                            response_type='error',
+                            error="No pretrained_path provided for pretrained mode"
+                        )
+                    logger.info(f"Initializing from pretrained model: {pretrained_path}")
+                    loaded = self.trainer.load_model_weights_only(Path(pretrained_path))
+                    return TrainingResponse(
+                        success=True,
+                        response_type='training_initialized',
+                        payload={
+                            'mode': 'pretrained',
+                            'loaded': loaded,
+                            'global_step': self.trainer.global_step,
+                            'message': f"Loaded pretrained weights from {pretrained_path}" if loaded else "Pretrained model not found, using fresh weights"
+                        }
+                    )
+                
+                else:  # mode == 'resume'
+                    logger.info("Attempting to resume from latest checkpoint")
+                    resumed = self.trainer.auto_resume()
+                    return TrainingResponse(
+                        success=True,
+                        response_type='training_initialized',
+                        payload={
+                            'mode': 'resume',
+                            'resumed': resumed,
+                            'global_step': self.trainer.global_step,
+                            'message': f"Resumed from checkpoint at step {self.trainer.global_step}" if resumed else "No checkpoint found, using current model"
+                        }
+                    )
             
             elif request.request_type == 'stop_training':
                 shutdown_server = request.payload.get('shutdown_server', False) if request.payload else False
