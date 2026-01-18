@@ -43,7 +43,8 @@ from rl_hanabi.training.data_collection import ReplayBuffer, create_dataloader
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename="/home/immata/hanabi-rl/hanabi/logs/training.log"
 )
 logger = logging.getLogger('coordinator')
 
@@ -128,10 +129,6 @@ def game_worker(
         device=device,
         temperature=simulation_config.get("temperature", 1.0),
         epsilon=simulation_config.get("epsilon", 0.1),
-        max_num_colors=model_config["max_num_colors"],
-        max_num_ranks=model_config["max_num_ranks"],
-        max_hand_size=model_config["max_hand_size"],
-        max_num_players=model_config["max_num_players"],
     )
     
     games_played = 0
@@ -185,7 +182,7 @@ class DistributedCoordinator:
         self.simulation_config = simulation_config
         self.buffer = buffer
         self.state = state
-        self.num_workers = num_workers if num_workers > 0 else max(1, cpu_count() - 1)
+        self.num_workers = num_workers if num_workers > 0 else max(1, cpu_count() - 3)
         self.checkpoint_dir = checkpoint_dir
         self.use_wandb = use_wandb and HAS_WANDB
         

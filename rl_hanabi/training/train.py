@@ -91,10 +91,6 @@ def game_worker(
         device=device,
         temperature=simulation_config.get("temperature", 1.0),
         epsilon=simulation_config.get("epsilon", 0.1),
-        max_num_colors=model_config["max_num_colors"],
-        max_num_ranks=model_config["max_num_ranks"],
-        max_hand_size=model_config["max_hand_size"],
-        max_num_players=model_config["max_num_players"],
     )
     
     games_played = 0

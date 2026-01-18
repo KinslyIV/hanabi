@@ -85,10 +85,6 @@ class GameSimulator:
         device: torch.device,
         temperature: float = 1.0,
         epsilon: float = 0.1,
-        max_num_colors: int = 5,
-        max_num_ranks: int = 5,
-        max_hand_size: int = 5,
-        max_num_players: int = 5,
     ):
         """
         Args:
@@ -105,10 +101,10 @@ class GameSimulator:
         self.device = device
         self.temperature = temperature
         self.epsilon = epsilon
-        self.max_num_colors = max_num_colors
-        self.max_num_ranks = max_num_ranks
-        self.max_hand_size = max_hand_size
-        self.max_num_players = max_num_players
+        self.max_num_colors = model.max_num_colors
+        self.max_num_ranks = model.max_num_ranks
+        self.max_hand_size = model.max_hand_size
+        self.max_num_players = model.max_num_players
     
     def _pad_observation(self, all_hands, fireworks, discard_pile, affected_mask, config):
         """Pad observations to match model's expected max dimensions."""
