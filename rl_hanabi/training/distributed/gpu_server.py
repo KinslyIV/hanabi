@@ -274,20 +274,40 @@ class GPUTrainer:
         self.load_state_dict(state)
         logger.info(f"Loaded checkpoint from {filepath}")
     
-    def load_model_weights_only(self, filepath: Path) -> None:
-        """Load only model weights from checkpoint (for transfer learning/pretrained models)."""
-        state = torch.load(filepath, map_location=self.device)
-        if "model_state_dict" in state:
-            self.model.load_state_dict(state["model_state_dict"])
-        else:
-            # Assume it's just model weights
-            self.model.load_state_dict(state)
-        self.model.to(self.device)
-        # Reset training state for fresh start with pretrained weights
-        self.global_step = 0
-        self.epoch = 0
-        self.best_loss = float('inf')
-        logger.info(f"Loaded pretrained model weights from {filepath} (optimizer/scheduler reset)")
+    def load_model_weights_only(self, filepath: Path) -> bool:
+        """Load only model weights from checkpoint (for transfer learning/pretrained models).
+        
+        Returns:
+            True if weights were loaded, False if file not found (fresh model used).
+        """
+        if not filepath.exists():
+            logger.warning(f"Pretrained model not found at {filepath}, using fresh model")
+            # Reset training state for fresh start
+            self.global_step = 0
+            self.epoch = 0
+            self.best_loss = float('inf')
+            return False
+        
+        try:
+            state = torch.load(filepath, map_location=self.device)
+            if "model_state_dict" in state:
+                self.model.load_state_dict(state["model_state_dict"])
+            else:
+                # Assume it's just model weights
+                self.model.load_state_dict(state)
+            self.model.to(self.device)
+            # Reset training state for fresh start with pretrained weights
+            self.global_step = 0
+            self.epoch = 0
+            self.best_loss = float('inf')
+            logger.info(f"Loaded pretrained model weights from {filepath} (optimizer/scheduler reset)")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load pretrained model from {filepath}: {e}, using fresh model")
+            self.global_step = 0
+            self.epoch = 0
+            self.best_loss = float('inf')
+            return False
     
     def find_latest_checkpoint(self) -> Optional[Path]:
         """Find the most recent checkpoint in the checkpoint directory."""
@@ -475,6 +495,25 @@ class GPUServer:
                 return TrainingResponse(
                     success=True,
                     response_type='checkpoint_loaded',
+                )
+            
+            elif request.request_type == 'load_pretrained_model':
+                if not request.payload or 'filepath' not in request.payload:
+                    return TrainingResponse(
+                        success=False,
+                        response_type='error',
+                        error="No filepath provided for load_pretrained_model"
+                    )
+                filepath = Path(request.payload['filepath'])
+                loaded = self.trainer.load_model_weights_only(filepath)
+                return TrainingResponse(
+                    success=True,
+                    response_type='pretrained_model_loaded',
+                    payload={
+                        'global_step': self.trainer.global_step,
+                        'loaded': loaded,
+                        'message': 'Loaded pretrained weights' if loaded else 'Model not found, initialized fresh model'
+                    }
                 )
             
             elif request.request_type == 'get_stats':

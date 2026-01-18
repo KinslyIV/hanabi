@@ -385,6 +385,20 @@ class GPUClient:
         """Load checkpoint on GPU server."""
         await self._request('load_checkpoint', {'filepath': filepath})
     
+    async def load_pretrained_model(self, filepath: str) -> Dict[str, Any]:
+        """
+        Load pretrained model weights on GPU server.
+        This loads only the model weights, resetting optimizer/scheduler state.
+        Use this to start fresh training with a pretrained model.
+        
+        If the file is not found, a fresh model will be initialized instead.
+        
+        Returns:
+            Dict with 'loaded' (bool) indicating if weights were loaded,
+            and 'message' describing what happened.
+        """
+        return await self._request('load_pretrained_model', {'filepath': filepath})
+    
     async def get_stats(self) -> Dict[str, Any]:
         """Get server statistics."""
         return await self._request('get_stats')

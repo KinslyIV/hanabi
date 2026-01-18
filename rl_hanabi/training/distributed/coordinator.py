@@ -533,8 +533,14 @@ class DistributedCoordinator:
         game_config_ranges: Dict[str, Tuple[int, int]],
         save_interval: int = 10,
         log_interval: int = 100,
+        pretrained_model_path: Optional[str] = None,
     ) -> None:
-        """Run the full training loop."""
+        """Run the full training loop.
+        
+        Args:
+            pretrained_model_path: If provided, load this model's weights before training
+                                   (resets optimizer/scheduler for fresh training).
+        """
         
         # Setup GPU client callbacks
         self.gpu_client.config.on_connect = self._on_gpu_connect
@@ -550,6 +556,19 @@ class DistributedCoordinator:
             connected = await self.gpu_client.wait_for_connection(timeout=None)
             if not connected:
                 logger.error("Could not connect to GPU server")
+                return
+        
+        # Load pretrained model if specified
+        if pretrained_model_path:
+            logger.info(f"Attempting to load pretrained model from: {pretrained_model_path}")
+            try:
+                result = await self.gpu_client.load_pretrained_model(pretrained_model_path)
+                if result.get('loaded', False):
+                    logger.info("Pretrained model loaded successfully")
+                else:
+                    logger.info("Pretrained model not found, initialized fresh model")
+            except Exception as e:
+                logger.error(f"Failed to load pretrained model: {e}")
                 return
         
         # Track target iterations for completion detection
@@ -811,6 +830,7 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
             game_config_ranges=game_config_ranges,
             save_interval=args.save_interval,
             log_interval=args.log_interval,
+            pretrained_model_path=pretrained_model_path if should_reset_state else None,
         )
     finally:
         if args.use_wandb and HAS_WANDB:
