@@ -214,7 +214,7 @@ class DistributedCoordinator:
         self.simulation_config = simulation_config
         self.buffer = buffer
         self.state = state
-        self.num_workers = num_workers if num_workers > 0 else max(1, cpu_count() - 3)
+        self.num_workers = num_workers if num_workers > 0 else max(1, cpu_count() - 1)
         self.checkpoint_dir = checkpoint_dir
         self.use_wandb = use_wandb and HAS_WANDB
         
@@ -361,51 +361,53 @@ class DistributedCoordinator:
         all_metrics = []
         start_time = time.time()
         steps_done = 0
+
+        while steps_done < num_steps:
         
-        for batch_idx, batch in enumerate(dataloader):
-            if steps_done >= num_steps:
-                break
-            
-            # Check if paused (GPU disconnected)
-            if self.state.paused:
-                logger.info("Training paused - waiting for GPU server...")
-                await self.gpu_client.wait_for_connection(timeout=None)
-                self.state.paused = False
-                logger.info("GPU server back - resuming training")
-            
-            # Convert batch to numpy for serialization
-            numpy_batch = {
-                k: v.numpy() if isinstance(v, torch.Tensor) else v
-                for k, v in batch.items()
-            }
-            
-            try:
-                metrics = await self.gpu_client.train_step(numpy_batch)
-                all_metrics.append(metrics)
-                steps_done += 1
-                self.state.total_train_steps += 1
+            for batch_idx, batch in enumerate(dataloader):
+                if steps_done >= num_steps:
+                    break
                 
-                if steps_done % log_interval == 0:
-                    avg_loss = np.mean([m['total_loss'] for m in all_metrics[-log_interval:]])
-                    logger.info(f"  Step {steps_done}/{num_steps}, Loss: {avg_loss:.4f}")
+                # Check if paused (GPU disconnected)
+                if self.state.paused:
+                    logger.info("Training paused - waiting for GPU server...")
+                    await self.gpu_client.wait_for_connection(timeout=None)
+                    self.state.paused = False
+                    logger.info("GPU server back - resuming training")
+                
+                # Convert batch to numpy for serialization
+                numpy_batch = {
+                    k: v.numpy() if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+                
+                try:
+                    metrics = await self.gpu_client.train_step(numpy_batch)
+                    all_metrics.append(metrics)
+                    steps_done += 1
+                    self.state.total_train_steps += 1
                     
-                    if self.use_wandb:
-                        wandb.log({ # type: ignore
-                            "train/step": self.state.total_train_steps,
-                            "train/loss": metrics["total_loss"],
-                            "train/color_loss": metrics.get("color_loss", 0),
-                            "train/rank_loss": metrics.get("rank_loss", 0),
-                            "train/action_loss": metrics.get("action_loss", 0),
-                            "train/color_accuracy": metrics.get("color_accuracy", 0),
-                            "train/rank_accuracy": metrics.get("rank_accuracy", 0),
-                            "train/action_accuracy": metrics.get("action_accuracy", 0),
-                            "train/learning_rate": metrics.get("learning_rate", 0),
-                        })
-            
-            except Exception as e:
-                logger.error(f"Training step failed: {e}")
-                # Will retry on next iteration after reconnection
-                break
+                    if steps_done % log_interval == 0:
+                        avg_loss = np.mean([m['total_loss'] for m in all_metrics[-log_interval:]])
+                        logger.info(f"  Step {steps_done}/{num_steps}, Loss: {avg_loss:.4f}")
+                        
+                        if self.use_wandb:
+                            wandb.log({ # type: ignore
+                                "train/step": self.state.total_train_steps,
+                                "train/loss": metrics["total_loss"],
+                                "train/color_loss": metrics.get("color_loss", 0),
+                                "train/rank_loss": metrics.get("rank_loss", 0),
+                                "train/action_loss": metrics.get("action_loss", 0),
+                                "train/color_accuracy": metrics.get("color_accuracy", 0),
+                                "train/rank_accuracy": metrics.get("rank_accuracy", 0),
+                                "train/action_accuracy": metrics.get("action_accuracy", 0),
+                                "train/learning_rate": metrics.get("learning_rate", 0),
+                            })
+                
+                except Exception as e:
+                    logger.error(f"Training step failed: {e}")
+                    # Will retry on next iteration after reconnection
+                    break
         
         training_time = time.time() - start_time
         return all_metrics, training_time
