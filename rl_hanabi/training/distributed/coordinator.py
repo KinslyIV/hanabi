@@ -44,7 +44,6 @@ from rl_hanabi.training.data_collection import ReplayBuffer, create_dataloader
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename="/home/immata/hanabi-rl/hanabi/logs/training.log"
 )
 logger = logging.getLogger('coordinator')
 
