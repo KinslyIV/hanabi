@@ -1,0 +1,42 @@
+[Unit]
+Description=Hanabi Training Coordinator
+After=network.target
+Wants=network-online.target
+Documentation=https://github.com/yourusername/hanabi
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+WorkingDirectory=/home/%i/hanabi
+Environment="PATH=/home/%i/hanabi/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-/etc/default/hanabi-coordinator
+
+# Main command
+ExecStart=/home/%i/hanabi/.venv/bin/python -m rl_hanabi.training.distributed.coordinator \
+    --gpu-host ${GPU_HOST} \
+    --gpu-port ${GPU_PORT:-5555} \
+    --auth-token ${AUTH_TOKEN} \
+    --checkpoint-dir /home/%i/hanabi/checkpoints \
+    --num-iterations ${NUM_ITERATIONS:-1000} \
+    --games-per-iteration ${GAMES_PER_ITERATION:-100} \
+    --train-steps-per-iteration ${TRAIN_STEPS:-500} \
+    --batch-size ${BATCH_SIZE:-256} \
+    ${WANDB_FLAGS}
+
+# Restart settings - allow restarts, coordinator saves state
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# Resource limits (CPU only workload)
+MemoryMax=8G
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hanabi-coordinator
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+  GNU nano 7.2                                                                           /etc/systemd/system/hanabi-bot.service                                                                                     
+[Unit]
+Description=Hanabi Bot Service
+After=network.target
+
+[Service]
+# Replace USER and WORKING_DIRECTORY below before installing the unit on your system.
+# Recommended: create a dedicated linux user (e.g. "hanabi") and set that username here.
+WorkingDirectory=/home/immata/hanabi/hanabi/hanabi-bot
+
+# Optional environment file. Create /etc/default/hanabi-bot with lines like:
+# HANABI_USERNAME=botname
+# HANABI_PASSWORD=secret
+EnvironmentFile=/home/immata/hanabi/hanabi/hanabi-bot/.env
+PATH="/home/immata/.nvm/versions/node/v25.2.1/bin:$PATH"
+# Use bash -lc so we can source the environment file then exec npm.
+# The WorkingDirectory should contain the package.json and be the project root.
+ExecStart=/bin/bash -lc 'source /home/immata/hanabi/hanabi/hanabi-bot/.env  2>/dev/null || true; exec npm start --index=2'
+
+Restart=on-failure
+RestartSec=5
+
+# Use the journal for logs (default). If you prefer a file, either adjust ExecStart
+# or use systemd's StandardOutput/StandardError settings.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+
+

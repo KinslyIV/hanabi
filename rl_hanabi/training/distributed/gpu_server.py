@@ -1,0 +1,684 @@
+"""
+GPU Server - Runs on the laptop with GPU.
+Receives training batches over the network, performs GPU computations, and returns results.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import pickle
+import signal
+import struct
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('gpu_server')
+
+
+@dataclass
+class TrainingRequest:
+    """Request from coordinator to perform a training step."""
+    request_type: str  # 'train_step', 'get_weights', 'set_weights', 'ping', 'save_checkpoint', 'load_checkpoint'
+    payload: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class TrainingResponse:
+    """Response to coordinator after completing request."""
+    success: bool
+    response_type: str
+    payload: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class GPUTrainer:
+    """Handles GPU-based training operations."""
+    
+    def __init__(
+        self,
+        model_config: Dict[str, Any],
+        training_config: Dict[str, Any],
+        device: torch.device,
+        checkpoint_dir: Optional[Path] = None,
+    ):
+        self.device = device
+        self.model_config = model_config
+        self.training_config = training_config
+        self.checkpoint_dir = checkpoint_dir
+        
+        if checkpoint_dir:
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Import here to avoid circular imports
+        from rl_hanabi.model.belief_model import ActionDecoder
+        
+        # Create model
+        self.model = ActionDecoder(
+            max_num_colors=model_config["max_num_colors"],
+            max_num_ranks=model_config["max_num_ranks"],
+            max_hand_size=model_config["max_hand_size"],
+            max_num_players=model_config["max_num_players"],
+            num_heads=model_config.get("num_heads", 4),
+            num_layers=model_config.get("num_layers", 4),
+            d_model=model_config.get("d_model", 128),
+            action_dim=model_config.get("action_dim", 4),
+        )
+        self.model.to(device)
+        
+        # Optimizer
+        self.optimizer = AdamW(
+            self.model.parameters(),
+            lr=training_config.get("learning_rate", 1e-4),
+            weight_decay=training_config.get("weight_decay", 0.01),
+            betas=(0.9, 0.999),
+        )
+        
+        # Learning rate scheduler
+        self.scheduler = CosineAnnealingWarmRestarts(
+            self.optimizer,
+            T_0=training_config.get("scheduler_t0", 1000),
+            T_mult=training_config.get("scheduler_t_mult", 2),
+            eta_min=training_config.get("min_lr", 1e-6),
+        )
+        
+        # Loss weights
+        self.color_loss_weight = training_config.get("color_loss_weight", 1.0)
+        self.rank_loss_weight = training_config.get("rank_loss_weight", 1.0)
+        self.action_loss_weight = training_config.get("action_loss_weight", 1.0)
+        self.max_grad_norm = training_config.get("max_grad_norm", 1.0)
+        
+        # Training state
+        self.global_step = 0
+        self.epoch = 0
+        self.best_loss = float('inf')
+        
+        logger.info(f"GPUTrainer initialized on {device}")
+        logger.info(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+    
+    def compute_loss(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, Dict[str, float]]:
+        """Compute losses for a batch of transitions."""
+        
+        # Move batch to device
+        slot_beliefs = batch["slot_beliefs"].to(self.device)
+        affected_mask = batch["affected_mask"].to(self.device)
+        move_target_player = batch["move_target_player"].to(self.device)
+        acting_player = batch["acting_player"].to(self.device)
+        action = batch["action"].to(self.device)
+        fireworks = batch["fireworks"].to(self.device)
+        discard_pile = batch["discard_pile"].to(self.device)
+        true_colors = batch["true_colors"].to(self.device)
+        true_ranks = batch["true_ranks"].to(self.device)
+        chosen_action_idx = batch["chosen_action_idx"].to(self.device)
+        legal_moves_mask = batch["legal_moves_mask"].to(self.device)
+        
+        # Forward pass
+        color_logits, rank_logits, action_logits = self.model(
+            slot_beliefs=slot_beliefs,
+            affected_mask=affected_mask,
+            move_target_player=move_target_player,
+            acting_player=acting_player,
+            action=action,
+            fireworks=fireworks,
+            discard_pile=discard_pile,
+        )
+        
+        B, H, C = color_logits.shape
+        _, _, R = rank_logits.shape
+        
+        # Create valid slot mask
+        valid_mask = (true_colors >= 0) & (true_ranks >= 0)
+        
+        # Color prediction loss
+        color_logits_flat = color_logits.view(-1, C)
+        true_colors_flat = true_colors.view(-1)
+        valid_mask_flat = valid_mask.view(-1)
+        
+        true_colors_flat_masked = true_colors_flat.clone()
+        true_colors_flat_masked[~valid_mask_flat] = 0
+        
+        color_loss = F.cross_entropy(
+            color_logits_flat,
+            true_colors_flat_masked,
+            reduction='none'
+        )
+        color_loss = (color_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
+        
+        # Rank prediction loss
+        rank_logits_flat = rank_logits.view(-1, R)
+        true_ranks_flat = true_ranks.view(-1)
+        
+        true_ranks_flat_masked = true_ranks_flat.clone()
+        true_ranks_flat_masked[~valid_mask_flat] = 0
+        
+        rank_loss = F.cross_entropy(
+            rank_logits_flat,
+            true_ranks_flat_masked,
+            reduction='none'
+        )
+        rank_loss = (rank_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
+        
+        # Action prediction loss
+        action_logits_masked = action_logits.clone()
+        action_logits_masked[~legal_moves_mask.bool()] = -1e9
+        
+        max_action_idx = action_logits.size(-1) - 1
+        chosen_action_idx_clamped = chosen_action_idx.clamp(0, max_action_idx)
+        
+        action_loss = F.cross_entropy(
+            action_logits_masked,
+            chosen_action_idx_clamped,
+            reduction='mean'
+        )
+        
+        # Total loss
+        total_loss = (
+            self.color_loss_weight * color_loss +
+            self.rank_loss_weight * rank_loss +
+            self.action_loss_weight * action_loss
+        )
+        
+        # Compute accuracies
+        with torch.no_grad():
+            color_preds = color_logits_flat.argmax(dim=-1)
+            color_correct = (color_preds == true_colors_flat) & valid_mask_flat
+            color_acc = color_correct.sum().float() / (valid_mask_flat.sum() + 1e-8)
+            
+            rank_preds = rank_logits_flat.argmax(dim=-1)
+            rank_correct = (rank_preds == true_ranks_flat) & valid_mask_flat
+            rank_acc = rank_correct.sum().float() / (valid_mask_flat.sum() + 1e-8)
+            
+            action_preds = action_logits_masked.argmax(dim=-1)
+            action_acc = (action_preds == chosen_action_idx_clamped).float().mean()
+        
+        metrics = {
+            "total_loss": total_loss.item(),
+            "color_loss": color_loss.item(),
+            "rank_loss": rank_loss.item(),
+            "action_loss": action_loss.item(),
+            "color_accuracy": color_acc.item(),
+            "rank_accuracy": rank_acc.item(),
+            "action_accuracy": action_acc.item(),
+        }
+        
+        return total_loss, metrics
+    
+    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        """Perform a single training step."""
+        self.model.train()
+        self.optimizer.zero_grad()
+        
+        loss, metrics = self.compute_loss(batch)
+        
+        loss.backward()
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+        
+        self.optimizer.step()
+        self.scheduler.step()
+        
+        self.global_step += 1
+        
+        metrics["learning_rate"] = self.optimizer.param_groups[0]["lr"]
+        metrics["global_step"] = self.global_step
+        
+        return metrics
+    
+    def get_state_dict(self) -> Dict[str, Any]:
+        """Get complete state for checkpointing."""
+        return {
+            "model_state_dict": {k: v.cpu() for k, v in self.model.state_dict().items()},
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "global_step": self.global_step,
+            "epoch": self.epoch,
+            "best_loss": self.best_loss,
+            "model_config": self.model_config,
+            "training_config": self.training_config,
+        }
+    
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Load complete state from checkpoint."""
+        self.model.load_state_dict(state["model_state_dict"])
+        self.model.to(self.device)
+        self.optimizer.load_state_dict(state["optimizer_state_dict"])
+        self.scheduler.load_state_dict(state["scheduler_state_dict"])
+        self.global_step = state["global_step"]
+        self.epoch = state.get("epoch", 0)
+        self.best_loss = state.get("best_loss", float('inf'))
+        logger.info(f"Loaded state at step {self.global_step}")
+    
+    def get_model_weights(self) -> Dict[str, torch.Tensor]:
+        """Get model weights for workers."""
+        return {k: v.cpu() for k, v in self.model.state_dict().items()}
+    
+    def save_checkpoint(self, filename: str) -> Path:
+        """Save checkpoint to disk."""
+        if self.checkpoint_dir is None:
+            raise ValueError("No checkpoint directory specified")
+        
+        filepath = self.checkpoint_dir / filename
+        torch.save(self.get_state_dict(), filepath)
+        logger.info(f"Saved checkpoint to {filepath}")
+        return filepath
+    
+    def load_checkpoint(self, filepath: Path) -> None:
+        """Load checkpoint from disk."""
+        state = torch.load(filepath, map_location=self.device)
+        self.load_state_dict(state)
+        logger.info(f"Loaded checkpoint from {filepath}")
+
+
+class GPUServer:
+    """Async TCP server that handles training requests from the coordinator."""
+    
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        trainer: GPUTrainer,
+        auth_token: Optional[str] = None,
+    ):
+        self.host = host
+        self.port = port
+        self.trainer = trainer
+        self.auth_token = auth_token
+        self.server: Optional[asyncio.Server] = None
+        self._shutdown_event = asyncio.Event()
+        self._active_connections: set = set()
+        
+        # Statistics
+        self.requests_handled = 0
+        self.total_training_time = 0.0
+        self.start_time = time.time()
+    
+    async def _send_response(
+        self,
+        writer: asyncio.StreamWriter,
+        response: TrainingResponse,
+    ) -> None:
+        """Send a response with length prefix."""
+        data = pickle.dumps(response)
+        length = struct.pack('>I', len(data))
+        writer.write(length + data)
+        await writer.drain()
+    
+    async def _recv_request(
+        self,
+        reader: asyncio.StreamReader,
+    ) -> Optional[TrainingRequest]:
+        """Receive a request with length prefix."""
+        try:
+            length_bytes = await asyncio.wait_for(
+                reader.readexactly(4),
+                timeout=300  # 5 minute timeout
+            )
+            length = struct.unpack('>I', length_bytes)[0]
+            
+            data = await asyncio.wait_for(
+                reader.readexactly(length),
+                timeout=300
+            )
+            return pickle.loads(data)
+        except asyncio.TimeoutError:
+            logger.warning("Request timeout")
+            return None
+        except asyncio.IncompleteReadError:
+            return None
+    
+    async def _handle_request(self, request: TrainingRequest) -> TrainingResponse:
+        """Process a single request."""
+        try:
+            if request.request_type == 'ping':
+                return TrainingResponse(
+                    success=True,
+                    response_type='pong',
+                    payload={
+                        'global_step': self.trainer.global_step,
+                        'requests_handled': self.requests_handled,
+                        'uptime': time.time() - self.start_time,
+                    }
+                )
+            
+            elif request.request_type == 'train_step':
+
+                if request.payload:
+                    batch = request.payload['batch']
+                else:
+                    return TrainingResponse(
+                        success=False,
+                        response_type='error',
+                        error="No batch provided for train_step"
+                    )
+                # Convert numpy arrays to tensors
+                tensor_batch = {
+                    k: torch.from_numpy(v) if hasattr(v, 'numpy') or isinstance(v, bytes) else torch.tensor(v)
+                    for k, v in batch.items()
+                }
+                
+                start = time.time()
+                metrics = self.trainer.train_step(tensor_batch)
+                self.total_training_time += time.time() - start
+                
+                return TrainingResponse(
+                    success=True,
+                    response_type='train_step_result',
+                    payload={'metrics': metrics}
+                )
+            
+            elif request.request_type == 'get_weights':
+                weights = self.trainer.get_model_weights()
+                return TrainingResponse(
+                    success=True,
+                    response_type='weights',
+                    payload={'weights': weights}
+                )
+            
+            elif request.request_type == 'get_state':
+                state = self.trainer.get_state_dict()
+                return TrainingResponse(
+                    success=True,
+                    response_type='state',
+                    payload={'state': state}
+                )
+            
+            elif request.request_type == 'set_state':
+                if not request.payload or 'state' not in request.payload:
+                    return TrainingResponse(
+                        success=False,
+                        response_type='error',
+                        error="No state provided for set_state"
+                    )
+                state = request.payload['state']
+                self.trainer.load_state_dict(state)
+                return TrainingResponse(
+                    success=True,
+                    response_type='state_set',
+                )
+            
+            elif request.request_type == 'save_checkpoint':
+                if not request.payload:
+                    filename = 'checkpoint.pt'
+                else:
+                    filename = request.payload.get('filename', 'checkpoint.pt')
+                filepath = self.trainer.save_checkpoint(filename)
+                return TrainingResponse(
+                    success=True,
+                    response_type='checkpoint_saved',
+                    payload={'filepath': str(filepath)}
+                )
+            
+            elif request.request_type == 'load_checkpoint':
+                if not request.payload or 'filepath' not in request.payload:
+                    return TrainingResponse(
+                        success=False,
+                        response_type='error',
+                        error="No filepath provided for load_checkpoint"
+                    )
+                filepath = Path(request.payload['filepath'])
+                self.trainer.load_checkpoint(filepath)
+                return TrainingResponse(
+                    success=True,
+                    response_type='checkpoint_loaded',
+                )
+            
+            elif request.request_type == 'get_stats':
+                return TrainingResponse(
+                    success=True,
+                    response_type='stats',
+                    payload={
+                        'global_step': self.trainer.global_step,
+                        'requests_handled': self.requests_handled,
+                        'total_training_time': self.total_training_time,
+                        'uptime': time.time() - self.start_time,
+                        'device': str(self.trainer.device),
+                    }
+                )
+            
+            else:
+                return TrainingResponse(
+                    success=False,
+                    response_type='error',
+                    error=f"Unknown request type: {request.request_type}"
+                )
+        
+        except Exception as e:
+            logger.exception(f"Error handling request: {e}")
+            return TrainingResponse(
+                success=False,
+                response_type='error',
+                error=str(e)
+            )
+    
+    async def _handle_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Handle a single client connection."""
+        addr = writer.get_extra_info('peername')
+        logger.info(f"New connection from {addr}")
+        self._active_connections.add(writer)
+        
+        try:
+            # Authentication
+            if self.auth_token:
+                auth_request = await self._recv_request(reader)
+                if not auth_request or auth_request.request_type != 'auth':
+                    logger.warning(f"Auth failed from {addr}: no auth request")
+                    await self._send_response(writer, TrainingResponse(
+                        success=False,
+                        response_type='auth_failed',
+                        error='Authentication required'
+                    ))
+                    return
+                if auth_request.payload is None:
+                    logger.warning(f"Auth failed from {addr}: no auth payload")
+                    await self._send_response(writer, TrainingResponse(
+                        success=False,
+                        response_type='auth_failed',
+                        error='No authentication payload'
+                    ))
+                    return
+                if auth_request.payload.get('token') != self.auth_token: 
+                    logger.warning(f"Auth failed from {addr}: invalid token")
+                    await self._send_response(writer, TrainingResponse(
+                        success=False,
+                        response_type='auth_failed',
+                        error='Invalid token'
+                    ))
+                    return
+                
+                await self._send_response(writer, TrainingResponse(
+                    success=True,
+                    response_type='auth_success',
+                ))
+                logger.info(f"Client {addr} authenticated")
+            
+            # Request handling loop
+            while not self._shutdown_event.is_set():
+                request = await self._recv_request(reader)
+                if request is None:
+                    break
+                
+                response = await self._handle_request(request)
+                await self._send_response(writer, response)
+                self.requests_handled += 1
+        
+        except Exception as e:
+            logger.exception(f"Error with client {addr}: {e}")
+        
+        finally:
+            self._active_connections.discard(writer)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            logger.info(f"Connection closed from {addr}")
+    
+    async def start(self) -> None:
+        """Start the server."""
+        self.server = await asyncio.start_server(
+            self._handle_client,
+            self.host,
+            self.port,
+        )
+        
+        addr = self.server.sockets[0].getsockname()
+        logger.info(f"GPU Server listening on {addr}")
+        
+        async with self.server:
+            await self.server.serve_forever()
+    
+    async def stop(self) -> None:
+        """Stop the server gracefully."""
+        logger.info("Shutting down GPU Server...")
+        self._shutdown_event.set()
+        
+        # Close all active connections
+        for writer in list(self._active_connections):
+            writer.close()
+        
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+        
+        logger.info("GPU Server shutdown complete")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="GPU Training Server")
+    
+    # Network settings
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=5555, help="Port to listen on")
+    parser.add_argument("--auth-token", type=str, default=None, help="Authentication token")
+    
+    # Device settings
+    parser.add_argument("--device", type=str, default="auto", help="Device (cpu, cuda, or auto)")
+    
+    # Model configuration
+    parser.add_argument("--max-players", type=int, default=5, help="Maximum number of players")
+    parser.add_argument("--max-colors", type=int, default=5, help="Maximum number of colors")
+    parser.add_argument("--max-ranks", type=int, default=5, help="Maximum number of ranks")
+    parser.add_argument("--max-hand-size", type=int, default=5, help="Maximum hand size")
+    parser.add_argument("--num-heads", type=int, default=4, help="Number of attention heads")
+    parser.add_argument("--num-layers", type=int, default=4, help="Number of transformer layers")
+    parser.add_argument("--d-model", type=int, default=128, help="Model dimension")
+    
+    # Training configuration
+    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay")
+    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Max gradient norm")
+    parser.add_argument("--scheduler-t0", type=int, default=1000, help="Scheduler T_0")
+    parser.add_argument("--min-lr", type=float, default=1e-6, help="Minimum learning rate")
+    
+    # Loss weights
+    parser.add_argument("--color-loss-weight", type=float, default=1.0, help="Color loss weight")
+    parser.add_argument("--rank-loss-weight", type=float, default=1.0, help="Rank loss weight")
+    parser.add_argument("--action-loss-weight", type=float, default=1.0, help="Action loss weight")
+    
+    # Checkpoint settings
+    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint directory")
+    parser.add_argument("--load-checkpoint", type=str, default=None, help="Checkpoint to load")
+    
+    args = parser.parse_args()
+    
+    # Setup device
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
+    
+    logger.info(f"Using device: {device}")
+    if device.type == "cuda":
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    
+    # Configuration
+    model_config = {
+        "max_num_colors": args.max_colors,
+        "max_num_ranks": args.max_ranks,
+        "max_hand_size": args.max_hand_size,
+        "max_num_players": args.max_players,
+        "num_heads": args.num_heads,
+        "num_layers": args.num_layers,
+        "d_model": args.d_model,
+        "action_dim": 4,
+    }
+    
+    training_config = {
+        "learning_rate": args.learning_rate,
+        "weight_decay": args.weight_decay,
+        "max_grad_norm": args.max_grad_norm,
+        "scheduler_t0": args.scheduler_t0,
+        "scheduler_t_mult": 2,
+        "min_lr": args.min_lr,
+        "color_loss_weight": args.color_loss_weight,
+        "rank_loss_weight": args.rank_loss_weight,
+        "action_loss_weight": args.action_loss_weight,
+    }
+    
+    # Create trainer
+    trainer = GPUTrainer(
+        model_config=model_config,
+        training_config=training_config,
+        device=device,
+        checkpoint_dir=Path(args.checkpoint_dir),
+    )
+    
+    # Load checkpoint if specified
+    if args.load_checkpoint:
+        trainer.load_checkpoint(Path(args.load_checkpoint))
+    
+    # Create and run server
+    server = GPUServer(
+        host=args.host,
+        port=args.port,
+        trainer=trainer,
+        auth_token=args.auth_token,
+    )
+    
+    # Setup signal handlers
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    def signal_handler(sig, frame):
+        logger.info(f"Received signal {sig}")
+        loop.create_task(server.stop())
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        loop.run_until_complete(server.start())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.run_until_complete(server.stop())
+        loop.close()
+
+
+if __name__ == "__main__":
+    main()

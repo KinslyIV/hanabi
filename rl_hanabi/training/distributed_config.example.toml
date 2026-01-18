@@ -1,0 +1,72 @@
+# Distributed Training Configuration
+# Copy this to distributed_config.toml and adjust values
+
+[network]
+# GPU server (laptop) settings
+gpu_host = "192.168.1.100"  # Change to your laptop's IP
+gpu_port = 5555
+auth_token = "your-secret-token-here"  # Set a secure token
+
+[model]
+# Model architecture - must match on both server and laptop
+max_players = 5
+max_colors = 5
+max_ranks = 5
+max_hand_size = 5
+num_heads = 4
+num_layers = 4
+d_model = 128
+
+[training]
+# Training hyperparameters
+learning_rate = 1e-4
+weight_decay = 0.01
+max_grad_norm = 1.0
+batch_size = 256
+scheduler_t0 = 1000
+min_lr = 1e-6
+
+# Loss weights
+color_loss_weight = 1.0
+rank_loss_weight = 1.0
+action_loss_weight = 1.0
+
+[simulation]
+# Game simulation settings
+temperature = 1.0
+epsilon = 0.1
+epsilon_decay = 0.01
+min_epsilon = 0.01
+collect_all_perspectives = true
+
+[game_ranges]
+# Game configuration ranges for variety
+min_players = 2
+max_players = 5
+min_colors = 3
+max_colors = 5
+min_ranks = 3
+max_ranks = 5
+
+[iteration]
+# Training loop settings
+num_iterations = 1000
+games_per_iteration = 100
+train_steps_per_iteration = 500
+buffer_size = 100000
+num_workers = 0  # 0 = auto (cpu_count - 1)
+
+[logging]
+log_interval = 100
+save_interval = 10
+use_wandb = true
+wandb_project = "hanabi-distributed"
+run_name = ""  # Empty = auto-generated
+tags = "distributed,self-play"
+
+[paths]
+checkpoint_dir = "checkpoints"
+buffer_dir = ""  # Empty = don't save buffer
+
+[general]
+seed = 42

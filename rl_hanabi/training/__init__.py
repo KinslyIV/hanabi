@@ -20,6 +20,14 @@ from rl_hanabi.training.trainer import (
     init_wandb,
 )
 
+# Distributed training imports
+from rl_hanabi.training.distributed import (
+    GPUClient,
+    GPUClientConfig,
+    GPUServer,
+    GPUTrainer,
+)
+
 __all__ = [
     # Game simulation
     "GameSimulator",
@@ -37,4 +45,9 @@ __all__ = [
     "HanabiTrainer",
     "log_game_metrics",
     "init_wandb",
+    # Distributed training
+    "GPUClient",
+    "GPUClientConfig",
+    "GPUServer",
+    "GPUTrainer",
 ]
