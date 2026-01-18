@@ -1,3 +1,4 @@
 [submodule "hanabi-learning-environment"]
 path = hanabi-learning-environment
 url = https://github.com/KinslyIV/hanabi-learning-environment.git
+	branch = master
