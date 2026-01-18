@@ -1,0 +1,202 @@
+# Hanabi Self-Play Training Configuration
+# Example configurations for different training scenarios
+
+# =============================================================================
+# Default Configuration
+# =============================================================================
+# A balanced configuration for general training
+
+[default]
+# Random seed for reproducibility
+seed = 42
+
+# Device configuration (auto, cpu, cuda, cuda:0, etc.)
+device = "auto"
+
+# =============================================================================
+# Model Architecture
+# =============================================================================
+[model]
+# Maximum game dimensions (model is trained to handle up to these)
+max_players = 5
+max_colors = 5
+max_ranks = 5
+max_hand_size = 5
+
+# Transformer architecture
+num_heads = 4
+num_layers = 4
+d_model = 128
+action_dim = 4
+
+# =============================================================================
+# Training Hyperparameters
+# =============================================================================
+[training]
+# Optimizer settings
+learning_rate = 1e-4
+weight_decay = 0.01
+max_grad_norm = 1.0
+
+# Learning rate scheduler
+scheduler_t0 = 1000
+scheduler_t_mult = 2
+min_lr = 1e-6
+
+# Loss weights
+color_loss_weight = 1.0
+rank_loss_weight = 1.0
+action_loss_weight = 1.0
+
+# Batch size
+batch_size = 256
+
+# =============================================================================
+# Self-Play Configuration
+# =============================================================================
+[selfplay]
+# Number of parallel workers (0 = auto-detect based on CPU count)
+num_workers = 0
+
+# Games to play per iteration
+games_per_iteration = 100
+
+# Training steps per iteration
+train_steps_per_iteration = 500
+
+# Total number of iterations
+num_iterations = 100
+
+# Replay buffer size (number of transitions)
+buffer_size = 100000
+
+# =============================================================================
+# Game Configuration Ranges
+# =============================================================================
+# Games will be sampled uniformly from these ranges
+[game_config]
+min_players = 2
+max_players = 5
+min_colors = 3
+max_colors = 5
+min_ranks = 3
+max_ranks = 5
+
+# =============================================================================
+# Exploration Parameters
+# =============================================================================
+[exploration]
+# Temperature for action sampling (higher = more random)
+temperature = 1.0
+
+# Epsilon for epsilon-greedy exploration
+epsilon = 0.1
+
+# Epsilon decay per iteration (set to 0 to disable)
+epsilon_decay = 0.01
+
+# Minimum epsilon
+min_epsilon = 0.01
+
+# =============================================================================
+# Logging and Checkpointing
+# =============================================================================
+[logging]
+# Log training metrics every N steps
+log_interval = 100
+
+# Save checkpoint every N iterations
+save_interval = 10
+
+# Checkpoint directory
+checkpoint_dir = "checkpoints"
+
+# Buffer save directory (optional)
+buffer_dir = null
+
+# =============================================================================
+# Weights & Biases Configuration
+# =============================================================================
+[wandb]
+# Enable WandB logging
+enabled = true
+
+# WandB project name
+project = "hanabi-selfplay"
+
+# Run name (optional, auto-generated if not specified)
+run_name = null
+
+# Tags for this run (comma-separated)
+tags = "self-play,training"
+
+
+# =============================================================================
+# Preset Configurations
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Quick Test Configuration
+# For testing the training pipeline quickly
+# -----------------------------------------------------------------------------
+[presets.quick_test]
+num_iterations = 5
+games_per_iteration = 20
+train_steps_per_iteration = 100
+batch_size = 64
+buffer_size = 10000
+log_interval = 10
+save_interval = 5
+
+# -----------------------------------------------------------------------------
+# 2-Player Only Configuration
+# Focus on 2-player games for simpler training
+# -----------------------------------------------------------------------------
+[presets.two_player]
+min_players = 2
+max_players = 2
+games_per_iteration = 200
+train_steps_per_iteration = 1000
+
+# -----------------------------------------------------------------------------
+# Full Hanabi Configuration
+# Train on standard 5-color, 5-rank games only
+# -----------------------------------------------------------------------------
+[presets.full_hanabi]
+min_colors = 5
+max_colors = 5
+min_ranks = 5
+max_ranks = 5
+games_per_iteration = 150
+train_steps_per_iteration = 750
+
+# -----------------------------------------------------------------------------
+# Large Scale Training
+# For serious training runs
+# -----------------------------------------------------------------------------
+[presets.large_scale]
+num_workers = 8
+games_per_iteration = 500
+train_steps_per_iteration = 2000
+num_iterations = 500
+batch_size = 512
+buffer_size = 500000
+d_model = 256
+num_layers = 6
+num_heads = 8
+learning_rate = 3e-4
+
+# -----------------------------------------------------------------------------
+# Debug Configuration
+# Minimal configuration for debugging
+# -----------------------------------------------------------------------------
+[presets.debug]
+num_workers = 1
+num_iterations = 2
+games_per_iteration = 5
+train_steps_per_iteration = 10
+batch_size = 8
+buffer_size = 1000
+log_interval = 1
+save_interval = 1
+wandb_enabled = false
