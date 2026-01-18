@@ -59,7 +59,8 @@ class Transition:
     
     # Metadata
     game_config: Dict[str, int] = field(default_factory=dict)
-    reward: float = 0.0               # Immediate reward (e.g., score delta)
+    reward: float = 0.0               # Normalized final score reward
+    failed_play: bool = False         # Whether this was a failed play move (bomb)
     done: bool = False                # Whether game ended
 
 
@@ -171,7 +172,6 @@ class GameSimulator:
         
         transitions = []
         num_turns = 0
-        prev_score = 0
         
         while not state.is_terminal():
             current_player = state.current_player_index
@@ -194,48 +194,82 @@ class GameSimulator:
             move = state.index_to_move(action_idx)
             move_type = move.type()
             
-            # Collect transitions from each observer's perspective
+            # Store pre-move state information for transition creation
+            # We need the state BEFORE the move for RL (s_t, a_t, r_{t+1})
+            pre_move_hands = {}
+            
             if collect_all_perspectives:
                 observers = range(config.num_players)
             else:
                 observers = [current_player]
             
+            # Store observations before applying the move
+            for observer in observers:
+                all_hands, fireworks, discard_pile, tokens = belief_states[observer].prepare_belief_obs(observer)
+                # Also store ground truth for observer's hand
+                observer_hand = state.get_hands()[observer]
+                true_colors = np.array([card.color() for card in observer_hand], dtype=np.int64)
+                true_ranks = np.array([card.rank() for card in observer_hand], dtype=np.int64)
+                pre_move_hands[observer] = (all_hands, fireworks, discard_pile, tokens, true_colors, true_ranks)
+            
+            # Apply the move to get the affected indices
+            state.apply_move(move)
+            
+            # Get affected indices from the move history (now available after applying move)
+            history_item = state.state.move_history()[-1]
+            affected_indices = []
+            failed_play = False
+            if move_type in (pyhanabi.HanabiMoveType.REVEAL_COLOR, pyhanabi.HanabiMoveType.REVEAL_RANK):
+                affected_indices = list(history_item.card_info_revealed())
+            elif move_type == pyhanabi.HanabiMoveType.PLAY:
+                affected_indices = [move.card_index()]
+                # Check if the play was successful or a bomb
+                failed_play = not history_item.scored()
+            elif move_type == pyhanabi.HanabiMoveType.DISCARD:
+                affected_indices = [move.card_index()]
+            
+            # Now create transitions with accurate affected_mask
             for observer in observers:
                 transition = self._create_transition(
-                    belief_states[observer],
-                    state,
+                    pre_move_hands[observer],
                     move,
                     action_idx,
                     legal_moves_mask,
                     observer,
                     current_player,
+                    affected_indices,
                     config,
+                    failed_play=failed_play,
                 )
                 if transition is not None:
                     transitions.append(transition)
             
-            # Apply the move
-            state.apply_move(move)
-            
-            # Update belief states
+            # Update belief states for all players after the move
             for bs in belief_states:
                 bs.state = state
                 bs.update_from_move()
             
-            # Calculate reward
-            current_score = state.score()
-            reward = current_score - prev_score
-            prev_score = current_score
-            
-            # Update last transition with reward
-            if transitions:
-                transitions[-1].reward = reward
-            
             num_turns += 1
         
-        # Mark final transitions as done
-        for t in transitions[-config.num_players:]:
-            t.done = True
+        # Mark final turn transitions as done
+        # The last turn may have fewer transitions if game ended early
+        if collect_all_perspectives:
+            # Mark last config.num_players transitions as done (or fewer if list is shorter)
+            num_final = min(config.num_players, len(transitions))
+            for t in transitions[-num_final:]:
+                t.done = True
+        else:
+            # Mark only the last transition as done
+            if transitions:
+                transitions[-1].done = True
+        
+        # Assign normalized final score as base reward for all transitions
+        final_score = state.score()
+        max_score = state.max_score()
+        normalized_reward = final_score / max_score if max_score > 0 else 0.0
+        
+        for t in transitions:
+            t.reward = normalized_reward
         
         return GameResult(
             transitions=transitions,
@@ -278,6 +312,10 @@ class GameSimulator:
         padded_beliefs, padded_fireworks, padded_discard, padded_mask = self._pad_observation(
             all_hands, fireworks, discard_pile_one_hot, affected_mask, config
         )
+
+        player_idx, target_idx = belief_state.get_last_player_and_target_index()
+        player_offset = (player_idx - player) % config.num_players
+        target_offset = (target_idx - player) % config.num_players
         
         # Convert to tensors
         slot_beliefs_tensor = torch.from_numpy(padded_beliefs).float().unsqueeze(0).to(self.device)
@@ -285,8 +323,8 @@ class GameSimulator:
         action_tensor = torch.from_numpy(action_encoding).float().unsqueeze(0).to(self.device)
         fireworks_tensor = torch.from_numpy(padded_fireworks).float().unsqueeze(0).to(self.device)
         discard_pile_tensor = torch.from_numpy(padded_discard).float().unsqueeze(0).to(self.device)
-        target_player_tensor = torch.tensor([0], dtype=torch.long, device=self.device)
-        acting_player_tensor = torch.tensor([0], dtype=torch.long, device=self.device)
+        target_player_tensor = torch.tensor([target_offset], dtype=torch.long, device=self.device)
+        acting_player_tensor = torch.tensor([player_offset], dtype=torch.long, device=self.device)
         
         with torch.no_grad():
             _, _, action_logits = self.model(
@@ -320,20 +358,40 @@ class GameSimulator:
     
     def _create_transition(
         self,
-        belief_state: BeliefState,
-        state: HLEGameState,
+        pre_move_observation: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
         move: pyhanabi.HanabiMove,
         action_idx: int,
         legal_moves_mask: np.ndarray,
         observer: int,
         acting_player: int,
+        affected_indices: List[int],
         config: GameConfig,
+        failed_play: bool = False,
     ) -> Optional[Transition]:
-        """Create a transition from an observer's perspective."""
+        """Create a transition from an observer's perspective.
+        
+        The transition captures:
+        - State: observer's belief state before the move
+        - Action: the move taken by acting_player (encoded from observer's perspective)
+        - Targets: ground truth about observer's own cards for training belief prediction
+        - Action choice: the action_idx chosen (for training action selection)
+        - Affected indices: actual card indices affected by the move (from history)
+        
+        Args:
+            pre_move_observation: Tuple of (all_hands, fireworks, discard_pile, tokens, true_colors, true_ranks) from before move
+            move: The move that was taken
+            action_idx: Index of the chosen action
+            legal_moves_mask: Mask of legal moves
+            observer: The player observing (perspective for this transition)
+            acting_player: The player who took the action
+            affected_indices: List of card indices affected (from move history)
+            config: Game configuration
+            failed_play: Whether the move was a failed play (bomb)
+        """
         
         try:
-            # Get belief observation
-            all_hands, fireworks, discard_pile_one_hot, tokens = belief_state.prepare_belief_obs(observer)
+            # Unpack pre-move observation (includes ground truth)
+            all_hands, fireworks, discard_pile_one_hot, tokens, true_colors, true_ranks = pre_move_observation
             
             if all_hands is None:
                 return None
@@ -361,7 +419,9 @@ class GameSimulator:
             
             # Calculate offsets from observer's perspective
             acting_player_offset = (acting_player - observer) % config.num_players
-            target_player_offset = target_offset  # Already an offset from acting player
+            # Convert target_offset (relative to acting_player) to absolute index, then to offset from observer
+            target_player_index = (acting_player + target_offset) % config.num_players
+            target_player_offset = (target_player_index - observer) % config.num_players
             
             # Encode action
             action_encoding = np.array([
@@ -371,21 +431,17 @@ class GameSimulator:
                 clue_value
             ], dtype=np.float32)
             
-            # Create affected mask
+            # Create affected mask with actual affected indices
             affected_mask = np.zeros((config.num_players, config.hand_size), dtype=np.float32)
             if move_type in (pyhanabi.HanabiMoveType.REVEAL_COLOR, pyhanabi.HanabiMoveType.REVEAL_RANK):
-                # Would need to track which cards are affected - simplified here
-                target_player = (acting_player + target_offset) % config.num_players
-                target_player_offset_from_observer = (target_player - observer) % config.num_players
-                # Mark all slots as potentially affected (simplified)
-                affected_mask[target_player_offset_from_observer, :] = 1.0
+                # For clues: mark the specific card slots that were revealed
+                affected_mask[target_player_offset, affected_indices] = 1.0
+            elif move_type in (pyhanabi.HanabiMoveType.PLAY, pyhanabi.HanabiMoveType.DISCARD):
+                # For play/discard: mark the specific card being played/discarded
+                # from the acting player's hand (from observer's perspective)
+                affected_mask[acting_player_offset, affected_indices] = 1.0
             
-            # Get ground truth for observer's hand
-            observer_hand = state.get_hands()[observer]
-            true_colors = np.array([card.color() for card in observer_hand], dtype=np.int64)
-            true_ranks = np.array([card.rank() for card in observer_hand], dtype=np.int64)
-            
-            # Pad if hand is smaller than max
+            # Pad ground truth if hand is smaller than max
             if len(true_colors) < config.hand_size:
                 pad_size = config.hand_size - len(true_colors)
                 true_colors = np.pad(true_colors, (0, pad_size), constant_values=-1)
@@ -409,6 +465,7 @@ class GameSimulator:
                     "num_ranks": config.num_ranks,
                     "hand_size": config.hand_size,
                 },
+                failed_play=failed_play,
             )
         except Exception as e:
             # Log error but don't crash

@@ -180,8 +180,11 @@ class HanabiTrainer:
             rank_correct = (rank_preds == true_ranks_flat) & valid_mask_flat
             rank_acc = rank_correct.sum().float() / (valid_mask_flat.sum() + 1e-8)
             
+            # For action accuracy, use masked logits to get legal predictions
+            # but compute accuracy to see if model predicts the chosen legal action
             action_preds = action_logits_masked.argmax(dim=-1)
-            action_acc = (action_preds == chosen_action_idx_clamped).float().mean()
+            action_correct = (action_preds == chosen_action_idx_clamped)
+            action_acc = action_correct.float().mean()
         
         metrics = {
             "total_loss": total_loss.item(),

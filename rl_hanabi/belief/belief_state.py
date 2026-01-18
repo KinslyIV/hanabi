@@ -285,6 +285,21 @@ class BeliefState:
 
         self.apply_card_count_correction()
 
+
+    def get_last_player_and_target_index(self) -> tuple[int, int]:
+        """Returns the index of the player who made the last move."""
+        last_item = self.get_last_move()
+        if last_item is None:
+            return 0, 0
+        if last_item.move().type() in (HanabiMoveType.REVEAL_COLOR, HanabiMoveType.REVEAL_RANK):
+            move = last_item.move()
+            player_index = last_item.player()
+            target_offset = move.target_offset()
+            target_index = (player_index + target_offset) % self.num_players
+            return player_index, target_index 
+        
+        return last_item.player(), last_item.player()
+
     def encode_last_action(self) -> tuple[np.ndarray, np.ndarray]:
         """
         Encodes a Hanabi move into a vector representation.
@@ -303,6 +318,8 @@ class BeliefState:
         
         if move_type == HanabiMoveType.REVEAL_COLOR or move_type == HanabiMoveType.REVEAL_RANK:
             target_player_off = last_move.target_offset()
+            target_index = (player_index + target_player_off) % self.num_players
+            target_player_off = (target_index - self.player) % self.num_players
             clue_type = 0 if move_type == HanabiMoveType.REVEAL_COLOR else 1
             clue_value = last_move.color() if clue_type == 0 else last_move.rank()
             affected_mask = np.zeros((self.num_players, self.hand_size), dtype=np.float32)

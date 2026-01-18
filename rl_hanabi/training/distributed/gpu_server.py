@@ -88,6 +88,7 @@ class GPUTrainer:
         self.color_loss_weight = training_config.get("color_loss_weight", 1.0)
         self.rank_loss_weight = training_config.get("rank_loss_weight", 1.0)
         self.action_loss_weight = training_config.get("action_loss_weight", 1.0)
+        self.failed_play_penalty = training_config.get("failed_play_penalty", 2.0)
         self.max_grad_norm = training_config.get("max_grad_norm", 1.0)
         
         # Training state
@@ -102,7 +103,12 @@ class GPUTrainer:
         self,
         batch: Dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, Dict[str, float]]:
-        """Compute losses for a batch of transitions."""
+        """Compute losses for a batch of transitions.
+        
+        Action loss uses reward-weighted cross-entropy:
+        - Base reward is the normalized final score of the game
+        - Failed play moves receive a heavy penalty
+        """
         
         # Move batch to device
         slot_beliefs = batch["slot_beliefs"].to(self.device)
@@ -116,6 +122,8 @@ class GPUTrainer:
         true_ranks = batch["true_ranks"].to(self.device)
         chosen_action_idx = batch["chosen_action_idx"].to(self.device)
         legal_moves_mask = batch["legal_moves_mask"].to(self.device)
+        reward = batch["reward"].to(self.device)  # [B] normalized final score
+        failed_play = batch["failed_play"].to(self.device)  # [B] bool
         
         # Forward pass
         color_logits, rank_logits, action_logits = self.model(
@@ -163,18 +171,32 @@ class GPUTrainer:
         )
         rank_loss = (rank_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
         
-        # Action prediction loss
+        # Action loss - Policy Gradient (REINFORCE with baseline)
+        # Mask illegal actions
         action_logits_masked = action_logits.clone()
         action_logits_masked[~legal_moves_mask.bool()] = -1e9
         
         max_action_idx = action_logits.size(-1) - 1
         chosen_action_idx_clamped = chosen_action_idx.clamp(0, max_action_idx)
         
-        action_loss = F.cross_entropy(
-            action_logits_masked,
-            chosen_action_idx_clamped,
-            reduction='mean'
-        )
+        # Get log probability of the chosen action
+        log_probs = F.log_softmax(action_logits_masked, dim=-1)
+        chosen_log_prob = log_probs.gather(1, chosen_action_idx_clamped.unsqueeze(1)).squeeze(1)
+        
+        # Compute advantage with baseline (mean reward in batch)
+        # This reduces variance in the gradient estimates
+        baseline = reward.mean()
+        advantage = reward - baseline
+        
+        # Heavy penalty for failed plays - subtract from advantage
+        # Failed plays get negative advantage, discouraging them
+        advantage = advantage - self.failed_play_penalty * failed_play.float()
+        
+        # Policy gradient loss: -log π(a|s) * advantage
+        # When advantage > 0: we want to increase log_prob, so minimize -log_prob * pos = negative loss contribution
+        # When advantage < 0: we want to decrease log_prob, so minimize -log_prob * neg = positive loss contribution
+        # .detach() on advantage to not backprop through the reward/baseline
+        action_loss = -(chosen_log_prob * advantage.detach()).mean()
         
         # Total loss
         total_loss = (
@@ -193,8 +215,16 @@ class GPUTrainer:
             rank_correct = (rank_preds == true_ranks_flat) & valid_mask_flat
             rank_acc = rank_correct.sum().float() / (valid_mask_flat.sum() + 1e-8)
             
+            # For action accuracy, use masked logits to get legal predictions
+            # but compute accuracy to see if model predicts the chosen legal action
             action_preds = action_logits_masked.argmax(dim=-1)
-            action_acc = (action_preds == chosen_action_idx_clamped).float().mean()
+            action_correct = (action_preds == chosen_action_idx_clamped)
+            action_acc = action_correct.float().mean()
+            
+            # Additional metrics
+            avg_reward = reward.mean()
+            failed_play_rate = failed_play.float().mean()
+            avg_advantage = advantage.mean()
         
         metrics = {
             "total_loss": total_loss.item(),
@@ -204,6 +234,9 @@ class GPUTrainer:
             "color_accuracy": color_acc.item(),
             "rank_accuracy": rank_acc.item(),
             "action_accuracy": action_acc.item(),
+            "avg_reward": avg_reward.item(),
+            "avg_advantage": avg_advantage.item(),
+            "failed_play_rate": failed_play_rate.item(),
         }
         
         return total_loss, metrics
@@ -828,6 +861,8 @@ def main():
     parser.add_argument("--color-loss-weight", type=float, default=1.0, help="Color loss weight")
     parser.add_argument("--rank-loss-weight", type=float, default=1.0, help="Rank loss weight")
     parser.add_argument("--action-loss-weight", type=float, default=1.0, help="Action loss weight")
+    parser.add_argument("--failed-play-penalty", type=float, default=2.0, 
+                       help="Penalty multiplier for failed play moves (bombs)")
     
     # Checkpoint settings
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint directory")
@@ -875,6 +910,7 @@ def main():
         "color_loss_weight": args.color_loss_weight,
         "rank_loss_weight": args.rank_loss_weight,
         "action_loss_weight": args.action_loss_weight,
+        "failed_play_penalty": args.failed_play_penalty,
     }
     
     # Create trainer

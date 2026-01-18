@@ -464,6 +464,7 @@ class DistributedCoordinator:
                 "games/buffer_size": buffer_stats['buffer_size'],
                 "games/avg_score": buffer_stats.get('avg_score', 0),
                 "games/avg_normalized_score": buffer_stats.get('avg_normalized_score', 0),
+                "games/avg_turns": buffer_stats.get('avg_turns', 0),
                 "iteration": iteration,
             })
         

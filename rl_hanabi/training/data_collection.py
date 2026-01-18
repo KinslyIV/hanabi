@@ -36,7 +36,8 @@ class BatchedTransition:
     legal_moves_mask: torch.Tensor      # [B, action_space_size]
     
     # Metadata
-    rewards: torch.Tensor               # [B]
+    rewards: torch.Tensor               # [B] - normalized final score
+    failed_plays: torch.Tensor          # [B] - whether this was a failed play (bomb)
     dones: torch.Tensor                 # [B]
 
 
@@ -255,6 +256,7 @@ class HanabiDataset(Dataset):
             "chosen_action_idx": torch.tensor(t.chosen_action_idx, dtype=torch.long),
             "legal_moves_mask": torch.from_numpy(legal_moves_mask),
             "reward": torch.tensor(t.reward, dtype=torch.float32),
+            "failed_play": torch.tensor(t.failed_play, dtype=torch.bool),
             "done": torch.tensor(t.done, dtype=torch.bool),
             # Game config info for potential conditional processing
             "num_players": torch.tensor(num_players, dtype=torch.long),
