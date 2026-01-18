@@ -23,7 +23,7 @@ class BeliefState:
 
     """
 
-    def __init__(self, state: HLEGameState, player: int, belief_model: Optional[ActionDecoder] = None):
+    def __init__(self, state: HLEGameState, player: int):
         self.state = state
         self.player = player
         self.num_players = state.num_players
@@ -31,7 +31,6 @@ class BeliefState:
         self.num_colors = state.game.num_colors()
         self.hand_size = state.game.hand_size()
         self.num_players = state.num_players
-        self.belief_model = belief_model
         # Initialize belief arrays directly
         init_color = self.init_color_prob()
         init_rank = self.init_rank_prob()
@@ -81,19 +80,21 @@ class BeliefState:
     def rank_distribution(self) -> np.ndarray:
         """Returns the count of remaining cards for each rank."""
         # Total cards per rank: RANK_COUNTS[r] * num_colors
-        rank_counts = RANK_COUNTS.copy() * self.num_colors
+        # Use only the first num_ranks entries from RANK_COUNTS
+        rank_counts = RANK_COUNTS[:self.num_ranks].copy() * self.num_colors
 
         # Subtract played cards (fireworks)
         fireworks = np.array(self.state.fireworks(), dtype=float)
         if fireworks.size:
             for color_idx, fw_rank in enumerate(fireworks):
                 # Cards of ranks 0 to fw_rank-1 are played for this color
-                for r in range(int(fw_rank)):
+                for r in range(min(int(fw_rank), self.num_ranks)):
                     rank_counts[r] -= 1
 
         # Subtract discarded cards
         for card in self.state.discard_pile():
-            rank_counts[card.rank()] -= 1
+            if card.rank() < self.num_ranks:
+                rank_counts[card.rank()] -= 1
 
         return np.maximum(rank_counts, 0)
 
@@ -105,8 +106,11 @@ class BeliefState:
         player_observation = self.state.observation_for_player(self.player)
         card_knowledge = player_observation.card_knowledge()
         player_knowledge = card_knowledge[0]
+        
+        # Only iterate over cards actually in hand (may be less than hand_size late game)
+        num_cards_in_hand = len(player_knowledge)
 
-        for card_index in range(self.hand_size):
+        for card_index in range(min(self.hand_size, num_cards_in_hand)):
             knowledge: HanabiCardKnowledge = player_knowledge[card_index]
 
             # Create color mask
@@ -220,14 +224,14 @@ class BeliefState:
     def get_last_move(self) -> HanabiHistoryItem | None:
         history = self.state.state.move_history()
         if not history:
-            return
+            return None
         for item in reversed(history):
-            if item.move().move_type() != HanabiMoveType.DEAL:
+            if item.move().type() != HanabiMoveType.DEAL:
                 return item
 
         return None
 
-    def update_from_move(self):
+    def update_from_move(self, model: Optional[ActionDecoder] = None):
         """
         Updates the belief state based on a Hanabi move.
         """
@@ -256,13 +260,13 @@ class BeliefState:
                 target_player_off,
             )
 
-            action_probs = self.model_update(player_index,
-                                            target_player_off,
-                                            clue_type,
-                                            clue_value,
-                                            affected_indices,)
-            
-            return action_probs
+            self.model_update(move_player_index=player_index,
+                              target_player_off=target_player_off,
+                              clue_type=clue_type,
+                              clue_value=clue_value,
+                              affected_indices=affected_indices,
+                              model=model)
+
 
         elif move_type == HanabiMoveType.PLAY or move_type == HanabiMoveType.DISCARD:
             color, rank = last_history_item.color(), last_history_item.rank()
@@ -271,15 +275,62 @@ class BeliefState:
             value = last_history_item.scored() if move_type == HanabiMoveType.PLAY else 0
             self.update_from_draw(player_index)
 
-            action_probs = self.model_update(player_index,
-                                            target_player_off=0,
-                                            clue_type=action_type,
-                                            clue_value=value,
-                                            affected_indices=[hand_card_index],)
+            self.model_update(move_player_index=player_index,
+                                target_player_off=0,
+                                clue_type=action_type,
+                                clue_value=value,
+                                affected_indices=[hand_card_index],
+                                model=model)
 
-            return action_probs
 
         self.apply_card_count_correction()
+
+    def encode_last_action(self) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Encodes a Hanabi move into a vector representation.
+        
+        Returns:
+            Tuple of (action encoding [action_dim], affected_mask [num_players, hand_size])
+        """
+        last_item = self.get_last_move()
+        if last_item is None:
+            # No move to encode - return 2D mask
+            return np.zeros(4, dtype=np.float32), np.zeros((self.num_players, self.hand_size), dtype=np.float32)
+        last_move = last_item.move()
+        move_type = last_move.type()
+        player_index = last_item.player()
+        player_offset = (player_index - self.player) % self.num_players
+        
+        if move_type == HanabiMoveType.REVEAL_COLOR or move_type == HanabiMoveType.REVEAL_RANK:
+            target_player_off = last_move.target_offset()
+            clue_type = 0 if move_type == HanabiMoveType.REVEAL_COLOR else 1
+            clue_value = last_move.color() if clue_type == 0 else last_move.rank()
+            affected_mask = np.zeros((self.num_players, self.hand_size), dtype=np.float32)
+            affected_indices = last_item.card_info_revealed()
+            affected_mask[target_player_off, affected_indices] = 1.0
+            return (self.encode_move(
+                player_offset,
+                target_player_off,
+                clue_type,
+                clue_value,),
+                affected_mask
+                )
+        
+        elif move_type == HanabiMoveType.PLAY or move_type == HanabiMoveType.DISCARD:
+            action_type = 2 if move_type == HanabiMoveType.PLAY else 3
+            value = last_item.scored() if move_type == HanabiMoveType.PLAY else 0
+            hand_card_index = last_move.card_index()
+            affected_mask = np.zeros((self.num_players, self.hand_size), dtype=np.float32)
+            affected_mask[player_offset, hand_card_index] = 1.0
+            return (self.encode_move(
+                player_offset,
+                player_offset,
+                action_type,
+                value,
+            ), affected_mask)
+        
+        else:
+            raise ValueError("Unsupported move type for encoding.")
 
     # --- Deterministic Updates ---
 
@@ -341,7 +392,7 @@ class BeliefState:
 
     # --- Bayesian Update ---
 
-    def update_from_action(
+    def bayesian_update(
         self,
         observer: int,
         color_likelihoods: np.ndarray,
@@ -386,7 +437,7 @@ class BeliefState:
         rotated_rank = np.roll(self.rank_belief, shift=-player_index, axis=0)
         return rotated_color, rotated_rank
 
-    def encode_clue_action(
+    def encode_move(
         self,
         move_player_offset: int,
         target_player_offset: int,
@@ -394,7 +445,7 @@ class BeliefState:
         clue_value: int,
     ) -> np.ndarray:
         """
-        Encodes a clue action into a vector representation.
+        Encodes a move into a vector representation.
         
         Args:
             move_player_offset: Offset of the player who gave the clue
@@ -409,32 +460,97 @@ class BeliefState:
         # This matches action_dim=4 in ActionDecoder
         return np.array([move_player_offset, target_player_offset, clue_type, clue_value], dtype=np.float32)
 
+    def pad_observation(
+        self,
+        all_hands: np.ndarray,
+        fireworks: np.ndarray,
+        discard_pile: np.ndarray,
+        affected_mask: np.ndarray,
+        max_num_players: int,
+        max_hand_size: int,
+        max_num_colors: int,
+        max_num_ranks: int,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Pad observations to match model's expected max dimensions.
+        
+        Args:
+            all_hands: [P, H, C+R] - All hands observation
+            fireworks: [C] - Fireworks state
+            discard_pile: [C*R] - Discard pile one-hot
+            affected_mask: [P, H] - Affected slots mask
+            max_num_players: Maximum number of players
+            max_hand_size: Maximum hand size
+            max_num_colors: Maximum number of colors
+            max_num_ranks: Maximum number of ranks
+        
+        Returns:
+            Tuple of padded (slot_beliefs, fireworks, discard_pile, affected_mask)
+        """
+        # Pad slot_beliefs: [P, H, C+R] -> [max_P, max_H, max_C + max_R]
+        padded_beliefs = np.zeros(
+            (max_num_players, max_hand_size, max_num_colors + max_num_ranks),
+            dtype=np.float32
+        )
+        # Copy color beliefs
+        padded_beliefs[:self.num_players, :self.hand_size, :self.num_colors] = \
+            all_hands[:, :, :self.num_colors]
+        # Copy rank beliefs (shifted to after max_colors)
+        padded_beliefs[:self.num_players, :self.hand_size, max_num_colors:max_num_colors + self.num_ranks] = \
+            all_hands[:, :, self.num_colors:self.num_colors + self.num_ranks]
+        
+        # Pad fireworks: [C] -> [max_C]
+        padded_fireworks = np.zeros(max_num_colors, dtype=np.float32)
+        padded_fireworks[:self.num_colors] = fireworks
+        
+        # Pad discard_pile: [C*R] -> [max_C * max_R]
+        padded_discard = np.zeros(max_num_colors * max_num_ranks, dtype=np.float32)
+        # Remap indices from original layout to padded layout
+        for orig_idx in range(len(discard_pile)):
+            if discard_pile[orig_idx] > 0:
+                orig_color = orig_idx // self.num_ranks
+                orig_rank = orig_idx % self.num_ranks
+                new_idx = orig_color * max_num_ranks + orig_rank
+                padded_discard[new_idx] = discard_pile[orig_idx]
+        
+        # Pad affected_mask: [P, H] -> [max_P, max_H]
+        padded_mask = np.zeros((max_num_players, max_hand_size), dtype=np.float32)
+        padded_mask[:self.num_players, :self.hand_size] = affected_mask[:self.num_players, :self.hand_size]
+        
+        return padded_beliefs, padded_fireworks, padded_discard, padded_mask
+
     def model_update(
         self,
+        model: Optional[ActionDecoder],
         move_player_index: int,
         target_player_off: int,
         clue_type: int,
         clue_value: int,
         affected_indices: List[int],
-    ):
+    ) -> None:
         """
         Model-based belief update using the ActionDecoder.
         This function uses a learned model to refine the belief state based on observed actions.
         
         Args:
+            model: The ActionDecoder model (or None to skip update)
             move_player_index: The index of the player who made the action.
             target_player_off: The offset to the target player who received the clue based on the move player index.
-            clue_type: 0 for Color, 1 for Rank
+            clue_type: 0 for Color, 1 for Rank, 2 for Play, 3 for Discard
             clue_value: The value of the clue (color index or rank index)
             affected_indices: List of card indices in target player's hand that match the clue.
         """
         # Skip if no belief model is provided
-        if self.belief_model is None:
+        if model is None:
             return
         
         target_player = (move_player_index + target_player_off) % self.num_players
-
-        action_probs = None
+        
+        # Get model's expected max dimensions
+        max_num_colors: int = model.max_num_colors
+        max_num_ranks: int = model.max_num_ranks
+        max_hand_size: int = model.max_hand_size
+        max_num_players: int = model.max_num_players
         
         # Run model for each player to update each of their beliefs of their own hand
         for p in range(self.num_players):
@@ -446,7 +562,7 @@ class BeliefState:
             target_player_offset = (target_player - p) % self.num_players
             
             # Encode the action
-            action_encoding = self.encode_clue_action(
+            action_encoding = self.encode_move(
                 move_player_offset,
                 target_player_offset,
                 clue_type,
@@ -457,20 +573,30 @@ class BeliefState:
             affected_mask = np.zeros((self.num_players, self.hand_size), dtype=np.float32)
             affected_mask[target_player_offset, affected_indices] = 1.0
             
+            # Pad observations to model dimensions
+            padded_beliefs, padded_fireworks, padded_discard, padded_mask = self.pad_observation(
+                all_hands=all_hands,
+                fireworks=fireworks,
+                discard_pile=discard_pile_one_hot,
+                affected_mask=affected_mask,
+                max_num_players=max_num_players,
+                max_hand_size=max_hand_size,
+                max_num_colors=max_num_colors,
+                max_num_ranks=max_num_ranks,
+            )
+            
             # Convert numpy arrays to torch tensors
-            slot_beliefs_tensor = torch.from_numpy(all_hands).float().unsqueeze(0)  # [1, P, H, C+R]
-            affected_mask_tensor = torch.from_numpy(affected_mask).float().unsqueeze(0)  # [1, P, H]
-            action_tensor = torch.from_numpy(action_encoding).float().unsqueeze(0)  # [1, action_dim]
-            fireworks_tensor = torch.from_numpy(fireworks).float().unsqueeze(0)  # [1, C]
-            discard_pile_tensor = torch.from_numpy(discard_pile_one_hot).float().unsqueeze(0)  # [1, C*R]
+            slot_beliefs_tensor = torch.from_numpy(padded_beliefs).float().unsqueeze(0)
+            affected_mask_tensor = torch.from_numpy(padded_mask).float().unsqueeze(0)
+            action_tensor = torch.from_numpy(action_encoding).float().unsqueeze(0)
+            fireworks_tensor = torch.from_numpy(padded_fireworks).float().unsqueeze(0)
+            discard_pile_tensor = torch.from_numpy(padded_discard).float().unsqueeze(0)
             target_player_tensor = torch.tensor([target_player_offset], dtype=torch.long)
             acting_player_tensor = torch.tensor([move_player_offset], dtype=torch.long)
 
-            # For each affected slot, run the model to get updated beliefs
+            # Run the model
             with torch.no_grad():
-                    
-                # Run the belief model
-                color_logits, rank_logits, action_logits = self.belief_model(
+                color_logits, rank_logits, _ = model(
                     slot_beliefs=slot_beliefs_tensor,
                     affected_mask=affected_mask_tensor,
                     move_target_player=target_player_tensor,
@@ -480,28 +606,30 @@ class BeliefState:
                     discard_pile=discard_pile_tensor,
                 )
                 
-                # Convert logits to probabilities
-                color_probs = color_logits.squeeze(0).numpy()  # [hand_size, num_colors]
-                rank_probs = rank_logits.squeeze(0).numpy()  # [hand_size, num_ranks]
-                action_logits = action_logits.squeeze(0)  # [action_space_size]
+                # Convert logits to probabilities and extract relevant portion
+                color_probs_full = torch.softmax(color_logits, dim=-1).squeeze(0).numpy()
+                rank_probs_full = torch.softmax(rank_logits, dim=-1).squeeze(0).numpy()
+                
+                # Extract only the dimensions relevant to this game
+                color_probs = color_probs_full[:self.hand_size, :self.num_colors]
+                rank_probs = rank_probs_full[:self.hand_size, :self.num_ranks]
+                
+                # Re-normalize after slicing (important since we took a subset)
+                color_sums = color_probs.sum(axis=-1, keepdims=True)
+                color_sums = np.where(color_sums > 1e-12, color_sums, 1.0)
+                color_probs = color_probs / color_sums
+                
+                rank_sums = rank_probs.sum(axis=-1, keepdims=True)
+                rank_sums = np.where(rank_sums > 1e-12, rank_sums, 1.0)
+                rank_probs = rank_probs / rank_sums
 
                 # Update beliefs for observer p about their own hand
-                self.update_from_action(
+                self.bayesian_update(
                     observer=p,
                     color_likelihoods=color_probs,
-                    rank_likelihoods=rank_probs,)
+                    rank_likelihoods=rank_probs
+                )
                 
-
-                if p == self.player:
-                    move_mask = torch.tensor(self.state.legal_moves_mask())
-                    action_logits = action_logits[:move_mask.shape[0]] 
-                    action_logits[move_mask] = 0.0 
-                    action_probs = torch.softmax(action_logits, dim=0).cpu().numpy()
-
-        return action_probs
-                
-                
-  
 
     def prepare_belief_obs(self, player_index: int):
         """
@@ -519,11 +647,28 @@ class BeliefState:
 
         color_rank_belief = np.concatenate([self.color_belief[player_index], self.rank_belief[player_index]], axis=-1)
         other_hands_obs = self.others_hand_to_observation(player_index)
-        all_hands = np.array([color_rank_belief] + other_hands_obs)  # Shape: (num_players, hand_size, num_colors + num_ranks)
+        
+        # Stack all hand observations ensuring consistent shapes
+        all_hands_list = [color_rank_belief]  # Shape: (hand_size, num_colors + num_ranks)
+        for hand_obs in other_hands_obs:
+            # Ensure each hand observation has the correct shape
+            if hand_obs.shape != color_rank_belief.shape:
+                # Reshape or pad if necessary
+                reshaped = np.zeros_like(color_rank_belief)
+                min_h = min(hand_obs.shape[0], reshaped.shape[0])
+                min_f = min(hand_obs.shape[1], reshaped.shape[1])
+                reshaped[:min_h, :min_f] = hand_obs[:min_h, :min_f]
+                all_hands_list.append(reshaped)
+            else:
+                all_hands_list.append(hand_obs)
+        
+        all_hands = np.stack(all_hands_list, axis=0)  # Shape: (num_players, hand_size, num_colors + num_ranks)
         fireworks = np.array(self.state.fireworks())
-        discard_pile = self.cards_to_indices(self.state.discard_pile())
+        discard_pile_cards = self.state.discard_pile()
         discard_pile_one_hot = np.zeros(self.num_colors * self.num_ranks, dtype=float)
-        discard_pile_one_hot[discard_pile] = 1.0
+        if discard_pile_cards:  # Only index if there are discarded cards
+            discard_pile_indices = self.cards_to_indices(discard_pile_cards)
+            discard_pile_one_hot[discard_pile_indices] = 1.0
         info_tokens = self.state.information_tokens()
         life_tokens = self.state.life_tokens()
         tokens = np.array([info_tokens, life_tokens], dtype=float)
@@ -572,24 +717,29 @@ class BeliefState:
     def others_hand_to_observation(self, player_index: int) -> List[np.ndarray]:
         """
         Converts the player's observation of other's hand into a perfect belief.
+        Returns list of arrays, each with shape (hand_size, num_colors + num_ranks).
         """
         player_observation = self.state.observation_for_player(player_index)
         player_to_mask_offset = (self.player - player_index) % self.num_players
         players_hands = player_observation.observed_hands()
         other_hands = []
         for p in range(1, self.num_players):
-            hand_beliefs = []
             if p == player_to_mask_offset:
                 # Mask this bot's hand with his own beliefs
                 color_belief = self.color_belief[self.player]
                 rank_belief = self.rank_belief[self.player]
-                other_hands.append(np.concatenate([color_belief, rank_belief], axis=-1))
+                hand_obs = np.concatenate([color_belief, rank_belief], axis=-1)  # Shape: (hand_size, C+R)
+                other_hands.append(hand_obs)
                 continue
+            
             hand_cards = players_hands[p]
+            # Create array of shape (hand_size, num_colors + num_ranks)
+            hand_obs = np.zeros((self.hand_size, self.num_colors + self.num_ranks), dtype=float)
             for i, card in enumerate(hand_cards):
-                color_belief, rank_belief = self.perfect_card_belief(card)
-                hand_beliefs.append(np.concatenate([color_belief, rank_belief]))
-            other_hands.append(np.array(hand_beliefs))
+                if i < self.hand_size:
+                    color_belief, rank_belief = self.perfect_card_belief(card)
+                    hand_obs[i] = np.concatenate([color_belief, rank_belief])
+            other_hands.append(hand_obs)
 
         return other_hands
 

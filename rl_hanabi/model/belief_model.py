@@ -14,6 +14,12 @@ class ActionDecoder(nn.Module):
                  action_dim: int = 4):
 
         super().__init__()
+        
+        # Store max dimensions as instance attributes
+        self.max_num_colors = max_num_colors
+        self.max_num_ranks = max_num_ranks
+        self.max_hand_size = max_hand_size
+        self.max_num_players = max_num_players
 
         self.slot_belief_proj = nn.Linear(max_num_colors + max_num_ranks, d_model)
         self.act_proj  = nn.Linear(action_dim, d_model)
