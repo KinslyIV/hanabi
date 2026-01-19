@@ -80,7 +80,7 @@ class GPUTrainer:
         self.scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
             T_0=training_config.get("scheduler_t0", 1000),
-            T_mult=training_config.get("scheduler_t_mult", 2),
+            T_mult=training_config.get("scheduler_t_mult", 1.2),
             eta_min=training_config.get("min_lr", 1e-6),
         )
         
