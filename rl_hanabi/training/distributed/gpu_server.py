@@ -80,13 +80,13 @@ class GPUTrainer:
         self.scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
             T_0=training_config.get("scheduler_t0", 1000),
-            T_mult=training_config.get("scheduler_t_mult", 1.2),
+            T_mult=training_config.get("scheduler_t_mult", 1.3),
             eta_min=training_config.get("min_lr", 1e-6),
         )
         
         # Loss weights
-        self.color_loss_weight = training_config.get("color_loss_weight", 1.0)
-        self.rank_loss_weight = training_config.get("rank_loss_weight", 1.0)
+        self.color_loss_weight = training_config.get("color_loss_weight", 0.5)
+        self.rank_loss_weight = training_config.get("rank_loss_weight", 0.5)
         self.action_loss_weight = training_config.get("action_loss_weight", 1.0)
         self.failed_play_penalty = training_config.get("failed_play_penalty", 2.0)
         self.max_grad_norm = training_config.get("max_grad_norm", 1.0)
@@ -852,14 +852,14 @@ def main():
     
     # Training configuration
     parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay")
+    parser.add_argument("--weight-decay", type=float, default=0.0, help="Weight decay")
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Max gradient norm")
     parser.add_argument("--scheduler-t0", type=int, default=1000, help="Scheduler T_0")
     parser.add_argument("--min-lr", type=float, default=1e-6, help="Minimum learning rate")
     
     # Loss weights
-    parser.add_argument("--color-loss-weight", type=float, default=1.0, help="Color loss weight")
-    parser.add_argument("--rank-loss-weight", type=float, default=1.0, help="Rank loss weight")
+    parser.add_argument("--color-loss-weight", type=float, default=0.4, help="Color loss weight")
+    parser.add_argument("--rank-loss-weight", type=float, default=0.4, help="Rank loss weight")
     parser.add_argument("--action-loss-weight", type=float, default=1.0, help="Action loss weight")
     parser.add_argument("--failed-play-penalty", type=float, default=2.0, 
                        help="Penalty multiplier for failed play moves (bombs)")

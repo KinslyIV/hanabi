@@ -191,6 +191,61 @@ class HanabiDataset(Dataset):
         
         return self._process_transition(transition)
     
+    def _remap_action_index(
+        self,
+        orig_idx: int,
+        orig_players: int,
+        orig_colors: int,
+        orig_ranks: int,
+        orig_hand_size: int,
+    ) -> int:
+        """Remap an action index from original game config to max config.
+        
+        Action space layout:
+        - [0, H): Discard card i
+        - [H, 2H): Play card i
+        - [2H, 2H + (N-1)*C): Color clues: (player_offset-1)*C + color
+        - [2H + (N-1)*C, ...): Rank clues: (player_offset-1)*R + rank
+        """
+        H = orig_hand_size
+        N = orig_players
+        C = orig_colors
+        R = orig_ranks
+        
+        max_H = self.max_hand_size
+        max_N = self.max_num_players
+        max_C = self.max_num_colors
+        max_R = self.max_num_ranks
+        
+        # Discard
+        if orig_idx < H:
+            return orig_idx  # Same index (card slot)
+        
+        # Play
+        if orig_idx < 2 * H:
+            card_idx = orig_idx - H
+            return max_H + card_idx
+        
+        # Color clues
+        color_clue_start = 2 * H
+        num_color_clues = (N - 1) * C
+        if orig_idx < color_clue_start + num_color_clues:
+            rel_idx = orig_idx - color_clue_start
+            player_offset_minus_1 = rel_idx // C  # 0 to N-2
+            color = rel_idx % C
+            # Map to max action space
+            max_color_clue_start = 2 * max_H
+            return max_color_clue_start + player_offset_minus_1 * max_C + color
+        
+        # Rank clues
+        rank_clue_start = color_clue_start + num_color_clues
+        rel_idx = orig_idx - rank_clue_start
+        player_offset_minus_1 = rel_idx // R
+        rank = rel_idx % R
+        # Map to max action space
+        max_rank_clue_start = 2 * max_H + (max_N - 1) * max_C
+        return max_rank_clue_start + player_offset_minus_1 * max_R + rank
+    
     def _process_transition(self, t: Transition) -> Dict[str, torch.Tensor]:
         """Process and pad a transition to fixed dimensions."""
         config = t.game_config
@@ -229,12 +284,20 @@ class HanabiDataset(Dataset):
                     new_idx = orig_color * self.max_num_ranks + orig_rank
                     discard_pile[new_idx] = t.discard_pile[orig_idx]
         
-        # Pad legal moves mask
+        # Remap legal moves mask with proper action index mapping
         legal_moves_mask = np.zeros(self.max_action_space_size, dtype=np.float32)
-        # This is more complex due to action space layout differences
-        # For simplicity, just use the original mask for the valid range
-        min_len = min(len(t.legal_moves_mask), self.max_action_space_size)
-        legal_moves_mask[:min_len] = t.legal_moves_mask[:min_len]
+        for orig_idx, is_legal in enumerate(t.legal_moves_mask):
+            if is_legal:
+                new_idx = self._remap_action_index(
+                    orig_idx, num_players, num_colors, num_ranks, hand_size
+                )
+                if new_idx < self.max_action_space_size:
+                    legal_moves_mask[new_idx] = 1.0
+        
+        # Remap chosen action index
+        chosen_action_idx_remapped = self._remap_action_index(
+            t.chosen_action_idx, num_players, num_colors, num_ranks, hand_size
+        )
         
         # Pad true colors and ranks
         true_colors = np.full(self.max_hand_size, -1, dtype=np.int64)
@@ -253,7 +316,7 @@ class HanabiDataset(Dataset):
             "discard_pile": torch.from_numpy(discard_pile),
             "true_colors": torch.from_numpy(true_colors),
             "true_ranks": torch.from_numpy(true_ranks),
-            "chosen_action_idx": torch.tensor(t.chosen_action_idx, dtype=torch.long),
+            "chosen_action_idx": torch.tensor(chosen_action_idx_remapped, dtype=torch.long),
             "legal_moves_mask": torch.from_numpy(legal_moves_mask),
             "reward": torch.tensor(t.reward, dtype=torch.float32),
             "failed_play": torch.tensor(t.failed_play, dtype=torch.bool),
