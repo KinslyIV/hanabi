@@ -60,6 +60,7 @@ class Transition:
     # Metadata
     game_config: Dict[str, int] = field(default_factory=dict)
     reward: float = 0.0               # Normalized final score reward
+    step_reward: float = 0.0          # Immediate reward from this action (score change)
     failed_play: bool = False         # Whether this was a failed play move (bomb)
     done: bool = False                # Whether game ended
 
@@ -212,8 +213,16 @@ class GameSimulator:
                 true_ranks = np.array([card.rank() for card in observer_hand], dtype=np.int64)
                 pre_move_hands[observer] = (all_hands, fireworks, discard_pile, tokens, true_colors, true_ranks)
             
+            # Track score before move for step reward calculation
+            score_before = state.score()
+            
             # Apply the move to get the affected indices
             state.apply_move(move)
+            
+            # Calculate step reward (score change from this action)
+            score_after = state.score()
+            max_score = state.max_score()
+            step_reward = (score_after - score_before) / max_score if max_score > 0 else 0.0
             
             # Get affected indices from the move history (now available after applying move)
             history_item = state.state.move_history()[-1]
@@ -240,6 +249,7 @@ class GameSimulator:
                     affected_indices,
                     config,
                     failed_play=failed_play,
+                    step_reward=step_reward,
                 )
                 if transition is not None:
                     transitions.append(transition)
@@ -367,6 +377,7 @@ class GameSimulator:
         affected_indices: List[int],
         config: GameConfig,
         failed_play: bool = False,
+        step_reward: float = 0.0,
     ) -> Optional[Transition]:
         """Create a transition from an observer's perspective.
         
@@ -466,6 +477,7 @@ class GameSimulator:
                     "hand_size": config.hand_size,
                 },
                 failed_play=failed_play,
+                step_reward=step_reward,
             )
         except Exception as e:
             # Log error but don't crash

@@ -319,6 +319,7 @@ class HanabiDataset(Dataset):
             "chosen_action_idx": torch.tensor(chosen_action_idx_remapped, dtype=torch.long),
             "legal_moves_mask": torch.from_numpy(legal_moves_mask),
             "reward": torch.tensor(t.reward, dtype=torch.float32),
+            "step_reward": torch.tensor(getattr(t, 'step_reward', 0.0), dtype=torch.float32),
             "failed_play": torch.tensor(t.failed_play, dtype=torch.bool),
             "done": torch.tensor(t.done, dtype=torch.bool),
             # Game config info for potential conditional processing

@@ -123,6 +123,7 @@ class GPUTrainer:
         chosen_action_idx = batch["chosen_action_idx"].to(self.device)
         legal_moves_mask = batch["legal_moves_mask"].to(self.device)
         reward = batch["reward"].to(self.device)  # [B] normalized final score
+        step_reward = batch["step_reward"].to(self.device)  # [B] immediate score change
         failed_play = batch["failed_play"].to(self.device)  # [B] bool
         
         # Forward pass
@@ -171,7 +172,7 @@ class GPUTrainer:
         )
         rank_loss = (rank_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
         
-        # Action loss - Policy Gradient (REINFORCE with baseline)
+        # Action loss - Actor-Critic style Policy Gradient
         # Mask illegal actions
         action_logits_masked = action_logits.clone()
         action_logits_masked[~legal_moves_mask.bool()] = -1e9
@@ -183,19 +184,28 @@ class GPUTrainer:
         log_probs = F.log_softmax(action_logits_masked, dim=-1)
         chosen_log_prob = log_probs.gather(1, chosen_action_idx_clamped.unsqueeze(1)).squeeze(1)
         
-        # Compute advantage with baseline (mean reward in batch)
-        # This reduces variance in the gradient estimates
-        baseline = reward.mean()
-        advantage = reward - baseline
+        # Compute advantage combining:
+        # 1. Step reward (immediate score change from this action) - most important signal
+        # 2. Final game reward (normalized final score) with baseline subtraction
+        # 3. Penalty for failed plays (bombs)
         
-        # Heavy penalty for failed plays - subtract from advantage
-        # Failed plays get negative advantage, discouraging them
-        advantage = advantage - self.failed_play_penalty * failed_play.float()
+        # Step-level advantage: immediate reward is the clearest signal
+        # Scale step_reward higher since it's sparse (only plays that score give non-zero)
+        step_advantage = step_reward * 1.5  # Scale up since most are 0
+        
+        # Game-level advantage: reward relative to batch average
+        game_baseline = reward.mean()
+        game_advantage = (reward - game_baseline) * 1.0  # Lower weight for noisy game-level signal
+        
+        # Penalty for failed plays (bombs) - strong negative signal
+        bomb_penalty = -self.failed_play_penalty * failed_play.float()
+        
+        # Combined advantage
+        advantage = step_advantage + game_advantage + bomb_penalty
         
         # Policy gradient loss: -log π(a|s) * advantage
-        # When advantage > 0: we want to increase log_prob, so minimize -log_prob * pos = negative loss contribution
-        # When advantage < 0: we want to decrease log_prob, so minimize -log_prob * neg = positive loss contribution
-        # .detach() on advantage to not backprop through the reward/baseline
+        # Positive advantage -> increase probability of action
+        # Negative advantage -> decrease probability of action
         action_loss = -(chosen_log_prob * advantage.detach()).mean()
         
         # Total loss
@@ -223,8 +233,11 @@ class GPUTrainer:
             
             # Additional metrics
             avg_reward = reward.mean()
+            avg_step_reward = step_reward.mean()
             failed_play_rate = failed_play.float().mean()
             avg_advantage = advantage.mean()
+            avg_step_advantage = step_advantage.mean()
+            avg_game_advantage = game_advantage.mean()
         
         metrics = {
             "total_loss": total_loss.item(),
@@ -235,7 +248,10 @@ class GPUTrainer:
             "rank_accuracy": rank_acc.item(),
             "action_accuracy": action_acc.item(),
             "avg_reward": avg_reward.item(),
+            "avg_step_reward": avg_step_reward.item(),
             "avg_advantage": avg_advantage.item(),
+            "avg_step_advantage": avg_step_advantage.item(),
+            "avg_game_advantage": avg_game_advantage.item(),
             "failed_play_rate": failed_play_rate.item(),
         }
         
