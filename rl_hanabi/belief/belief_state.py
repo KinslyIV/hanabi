@@ -603,17 +603,19 @@ class BeliefState:
             )
             
             # Convert numpy arrays to torch tensors
-            slot_beliefs_tensor = torch.from_numpy(padded_beliefs).float().unsqueeze(0)
-            affected_mask_tensor = torch.from_numpy(padded_mask).float().unsqueeze(0)
-            action_tensor = torch.from_numpy(action_encoding).float().unsqueeze(0)
-            fireworks_tensor = torch.from_numpy(padded_fireworks).float().unsqueeze(0)
-            discard_pile_tensor = torch.from_numpy(padded_discard).float().unsqueeze(0)
-            target_player_tensor = torch.tensor([target_player_offset], dtype=torch.long)
-            acting_player_tensor = torch.tensor([move_player_offset], dtype=torch.long)
+            # Get device from model parameters
+            device = next(model.parameters()).device
+            slot_beliefs_tensor = torch.from_numpy(padded_beliefs).float().unsqueeze(0).to(device)
+            affected_mask_tensor = torch.from_numpy(padded_mask).float().unsqueeze(0).to(device)
+            action_tensor = torch.from_numpy(action_encoding).float().unsqueeze(0).to(device)
+            fireworks_tensor = torch.from_numpy(padded_fireworks).float().unsqueeze(0).to(device)
+            discard_pile_tensor = torch.from_numpy(padded_discard).float().unsqueeze(0).to(device)
+            target_player_tensor = torch.tensor([target_player_offset], dtype=torch.long, device=device)
+            acting_player_tensor = torch.tensor([move_player_offset], dtype=torch.long, device=device)
 
             # Run the model
             with torch.no_grad():
-                color_logits, rank_logits, _ = model(
+                color_logits, rank_logits, _, _ = model(
                     slot_beliefs=slot_beliefs_tensor,
                     affected_mask=affected_mask_tensor,
                     move_target_player=target_player_tensor,
@@ -624,8 +626,8 @@ class BeliefState:
                 )
                 
                 # Convert logits to probabilities and extract relevant portion
-                color_probs_full = torch.softmax(color_logits, dim=-1).squeeze(0).numpy()
-                rank_probs_full = torch.softmax(rank_logits, dim=-1).squeeze(0).numpy()
+                color_probs_full = torch.softmax(color_logits, dim=-1).squeeze(0).cpu().numpy()
+                rank_probs_full = torch.softmax(rank_logits, dim=-1).squeeze(0).cpu().numpy()
                 
                 # Extract only the dimensions relevant to this game
                 color_probs = color_probs_full[:self.hand_size, :self.num_colors]

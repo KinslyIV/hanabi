@@ -79,8 +79,8 @@ class GPUTrainer:
         # Learning rate scheduler
         self.scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
-            T_0=training_config.get("scheduler_t0", 1000),
-            T_mult=training_config.get("scheduler_t_mult", 1.3),
+            T_0=training_config.get("scheduler_t0", 500),
+            T_mult=training_config.get("scheduler_t_mult", 2.0),
             eta_min=training_config.get("min_lr", 1e-6),
         )
         
@@ -88,8 +88,13 @@ class GPUTrainer:
         self.color_loss_weight = training_config.get("color_loss_weight", 0.5)
         self.rank_loss_weight = training_config.get("rank_loss_weight", 0.5)
         self.action_loss_weight = training_config.get("action_loss_weight", 1.0)
+        self.value_loss_weight = training_config.get("value_loss_weight", 1.0)
+        self.policy_loss_weight = training_config.get("policy_loss_weight", 1.0)
         self.failed_play_penalty = training_config.get("failed_play_penalty", 2.0)
         self.max_grad_norm = training_config.get("max_grad_norm", 1.0)
+        
+        # Training mode: 'supervised' or 'mcts'
+        self.training_mode = training_config.get("training_mode", "supervised")
         
         # Training state
         self.global_step = 0
@@ -105,9 +110,9 @@ class GPUTrainer:
     ) -> tuple[torch.Tensor, Dict[str, float]]:
         """Compute losses for a batch of transitions.
         
-        Action loss uses reward-weighted cross-entropy:
-        - Base reward is the normalized final score of the game
-        - Failed play moves receive a heavy penalty
+        Supports two training modes:
+        - 'supervised': Cross-entropy with chosen actions (original)
+        - 'mcts': Policy distillation from MCTS + value prediction
         """
         
         # Move batch to device
@@ -126,8 +131,13 @@ class GPUTrainer:
         step_reward = batch["step_reward"].to(self.device)  # [B] immediate score change
         failed_play = batch["failed_play"].to(self.device)  # [B] bool
         
+        # Get MCTS policy if available (for MCTS training mode)
+        mcts_policy = batch.get("mcts_policy")
+        if mcts_policy is not None:
+            mcts_policy = mcts_policy.to(self.device)
+        
         # Forward pass
-        color_logits, rank_logits, action_logits = self.model(
+        color_logits, rank_logits, action_logits, value = self.model(
             slot_beliefs=slot_beliefs,
             affected_mask=affected_mask,
             move_target_player=move_target_player,
@@ -172,7 +182,7 @@ class GPUTrainer:
         )
         rank_loss = (rank_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
         
-        # Action loss - Actor-Critic style Policy Gradient
+        # ========== Action/Policy Loss ==========
         # Mask illegal actions
         action_logits_masked = action_logits.clone()
         action_logits_masked[~legal_moves_mask.bool()] = -1e9
@@ -180,40 +190,55 @@ class GPUTrainer:
         max_action_idx = action_logits.size(-1) - 1
         chosen_action_idx_clamped = chosen_action_idx.clamp(0, max_action_idx)
         
-        # Get log probability of the chosen action
-        log_probs = F.log_softmax(action_logits_masked, dim=-1)
-        chosen_log_prob = log_probs.gather(1, chosen_action_idx_clamped.unsqueeze(1)).squeeze(1)
+        # Compute action loss based on training mode
+        if self.training_mode == "mcts" and mcts_policy is not None:
+            # MCTS policy distillation: cross-entropy with MCTS policy targets
+            log_probs = F.log_softmax(action_logits_masked, dim=-1)
+            
+            # Ensure MCTS policy is valid (sum to 1, non-negative)
+            mcts_policy_valid = mcts_policy.clamp(min=1e-8)
+            mcts_policy_valid = mcts_policy_valid / (mcts_policy_valid.sum(dim=-1, keepdim=True) + 1e-8)
+            
+            # Cross-entropy loss: -sum(target * log(pred))
+            policy_loss = -(mcts_policy_valid * log_probs).sum(dim=-1).mean()
+            
+            # Supervised action loss (for metrics)
+            action_loss = F.cross_entropy(
+                action_logits_masked,
+                chosen_action_idx_clamped,
+                reduction='mean'
+            )
+        else:
+            # Supervised mode with Actor-Critic style Policy Gradient
+            log_probs = F.log_softmax(action_logits_masked, dim=-1)
+            chosen_log_prob = log_probs.gather(1, chosen_action_idx_clamped.unsqueeze(1)).squeeze(1)
+            
+            # Compute advantage
+            step_advantage = step_reward * 1.5
+            game_baseline = reward.mean()
+            game_advantage = (reward - game_baseline) * 1.0
+            bomb_penalty = -self.failed_play_penalty * failed_play.float()
+            advantage = step_advantage + game_advantage + bomb_penalty
+            
+            action_loss = -(chosen_log_prob * advantage.detach()).mean()
+            policy_loss = action_loss  # Same in supervised mode
         
-        # Compute advantage combining:
-        # 1. Step reward (immediate score change from this action) - most important signal
-        # 2. Final game reward (normalized final score) with baseline subtraction
-        # 3. Penalty for failed plays (bombs)
+        # ========== Value Loss ==========
+        # MSE between predicted value and reward (normalized final score)
+        value_loss = F.mse_loss(value, reward)
         
-        # Step-level advantage: immediate reward is the clearest signal
-        # Scale step_reward higher since it's sparse (only plays that score give non-zero)
-        step_advantage = step_reward * 1.5  # Scale up since most are 0
-        
-        # Game-level advantage: reward relative to batch average
-        game_baseline = reward.mean()
-        game_advantage = (reward - game_baseline) * 1.0  # Lower weight for noisy game-level signal
-        
-        # Penalty for failed plays (bombs) - strong negative signal
-        bomb_penalty = -self.failed_play_penalty * failed_play.float()
-        
-        # Combined advantage
-        advantage = step_advantage + game_advantage + bomb_penalty
-        
-        # Policy gradient loss: -log π(a|s) * advantage
-        # Positive advantage -> increase probability of action
-        # Negative advantage -> decrease probability of action
-        action_loss = -(chosen_log_prob * advantage.detach()).mean()
-        
-        # Total loss
+        # ========== Total Loss ==========
         total_loss = (
             self.color_loss_weight * color_loss +
             self.rank_loss_weight * rank_loss +
-            self.action_loss_weight * action_loss
+            self.value_loss_weight * value_loss
         )
+        
+        # Add policy loss based on mode
+        if self.training_mode == "mcts" and mcts_policy is not None:
+            total_loss = total_loss + self.policy_loss_weight * policy_loss
+        else:
+            total_loss = total_loss + self.action_loss_weight * action_loss
         
         # Compute accuracies
         with torch.no_grad():
@@ -235,24 +260,25 @@ class GPUTrainer:
             avg_reward = reward.mean()
             avg_step_reward = step_reward.mean()
             failed_play_rate = failed_play.float().mean()
-            avg_advantage = advantage.mean()
-            avg_step_advantage = step_advantage.mean()
-            avg_game_advantage = game_advantage.mean()
+            
+            # Value prediction metrics
+            value_mae = (value - reward).abs().mean()
         
         metrics = {
             "total_loss": total_loss.item(),
             "color_loss": color_loss.item(),
             "rank_loss": rank_loss.item(),
             "action_loss": action_loss.item(),
+            "policy_loss": policy_loss.item(),
+            "value_loss": value_loss.item(),
             "color_accuracy": color_acc.item(),
             "rank_accuracy": rank_acc.item(),
             "action_accuracy": action_acc.item(),
             "avg_reward": avg_reward.item(),
             "avg_step_reward": avg_step_reward.item(),
-            "avg_advantage": avg_advantage.item(),
-            "avg_step_advantage": avg_step_advantage.item(),
-            "avg_game_advantage": avg_game_advantage.item(),
             "failed_play_rate": failed_play_rate.item(),
+            "value_mae": value_mae.item(),
+            "mean_value_pred": value.mean().item(),
         }
         
         return total_loss, metrics
@@ -870,15 +896,21 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight-decay", type=float, default=0.0, help="Weight decay")
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Max gradient norm")
-    parser.add_argument("--scheduler-t0", type=int, default=1000, help="Scheduler T_0")
+    parser.add_argument("--scheduler-t0", type=int, default=500, help="Scheduler T_0")
     parser.add_argument("--min-lr", type=float, default=1e-6, help="Minimum learning rate")
     
     # Loss weights
     parser.add_argument("--color-loss-weight", type=float, default=0.4, help="Color loss weight")
     parser.add_argument("--rank-loss-weight", type=float, default=0.4, help="Rank loss weight")
     parser.add_argument("--action-loss-weight", type=float, default=1.0, help="Action loss weight")
+    parser.add_argument("--value-loss-weight", type=float, default=1.0, help="Value prediction loss weight")
+    parser.add_argument("--policy-loss-weight", type=float, default=1.0, help="MCTS policy distillation loss weight")
     parser.add_argument("--failed-play-penalty", type=float, default=2.0, 
                        help="Penalty multiplier for failed play moves (bombs)")
+    
+    # Training mode
+    parser.add_argument("--training-mode", type=str, choices=["supervised", "mcts"], default="supervised",
+                       help="Training mode: 'supervised' (cross-entropy) or 'mcts' (policy distillation)")
     
     # Checkpoint settings
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint directory")
@@ -926,7 +958,10 @@ def main():
         "color_loss_weight": args.color_loss_weight,
         "rank_loss_weight": args.rank_loss_weight,
         "action_loss_weight": args.action_loss_weight,
+        "value_loss_weight": args.value_loss_weight,
+        "policy_loss_weight": args.policy_loss_weight,
         "failed_play_penalty": args.failed_play_penalty,
+        "training_mode": args.training_mode,
     }
     
     # Create trainer

@@ -3,10 +3,13 @@ from rl_hanabi.mcts.convention_rollout import (
     ConventionRolloutPolicy, 
     ParallelConventionRollout
 )
+from rl_hanabi.mcts.belief_mcts import BeliefMCTS, BeliefNode
 
 __all__ = [
     "MCTS",
     "Node", 
     "ConventionRolloutPolicy",
-    "ParallelConventionRollout"
+    "ParallelConventionRollout",
+    "BeliefMCTS",
+    "BeliefNode",
 ]

@@ -27,6 +27,10 @@ from rl_hanabi.training.game_simulator import (
     GameResult,
     sample_game_config,
 )
+from rl_hanabi.training.mcts_simulator import (
+    MCTSGameSimulator,
+    run_mcts_self_play,
+)
 from rl_hanabi.training.data_collection import (
     ReplayBuffer,
     create_dataloader,
@@ -85,13 +89,30 @@ def game_worker(
     model.to(device)
     model.eval()
     
-    # Create simulator with max dimensions
-    simulator = GameSimulator(
-        model=model,
-        device=device,
-        temperature=simulation_config.get("temperature", 1.0),
-        epsilon=simulation_config.get("epsilon", 0.1),
-    )
+    # Check training mode for simulator selection
+    training_mode = simulation_config.get("training_mode", "supervised")
+    
+    if training_mode == "mcts":
+        # Use MCTS simulator for AlphaZero-style training
+        simulator = MCTSGameSimulator(
+            model=model,
+            device=device,
+            mcts_simulations=simulation_config.get("mcts_simulations", 100),
+            c_puct=simulation_config.get("c_puct", 1.4),
+            temperature=simulation_config.get("temperature", 1.0),
+            temperature_drop_move=simulation_config.get("temperature_drop_move", 30),
+            dirichlet_alpha=simulation_config.get("dirichlet_alpha", 0.3),
+            dirichlet_weight=simulation_config.get("dirichlet_weight", 0.25),
+            top_k_actions=simulation_config.get("top_k_actions", 10),
+        )
+    else:
+        # Use standard simulator for supervised learning
+        simulator = GameSimulator(
+            model=model,
+            device=device,
+            temperature=simulation_config.get("temperature", 1.0),
+            epsilon=simulation_config.get("epsilon", 0.1),
+        )
     
     games_played = 0
     
@@ -121,6 +142,8 @@ def game_worker(
                 
         except Exception as e:
             print(f"[Worker {worker_id}] Error in game simulation: {e}")
+            import traceback
+            traceback.print_exc()
             continue
     
     print(f"[Worker {worker_id}] Shutting down after {games_played} games")
@@ -222,6 +245,9 @@ def run_training(args: argparse.Namespace):
         "color_loss_weight": args.color_loss_weight,
         "rank_loss_weight": args.rank_loss_weight,
         "action_loss_weight": args.action_loss_weight,
+        "value_loss_weight": args.value_loss_weight,
+        "policy_loss_weight": args.policy_loss_weight,
+        "training_mode": args.training_mode,
         "scheduler_t0": args.scheduler_t0,
         "scheduler_t_mult": 2,
         "min_lr": args.min_lr,
@@ -232,6 +258,14 @@ def run_training(args: argparse.Namespace):
         "temperature": args.temperature,
         "epsilon": args.epsilon,
         "collect_all_perspectives": True,
+        "training_mode": args.training_mode,
+        # MCTS-specific settings
+        "mcts_simulations": args.mcts_simulations,
+        "c_puct": args.c_puct,
+        "temperature_drop_move": args.temperature_drop_move,
+        "dirichlet_alpha": args.dirichlet_alpha,
+        "dirichlet_weight": args.dirichlet_weight,
+        "top_k_actions": args.top_k_actions,
     }
     
     # Full configuration for WandB
@@ -408,7 +442,7 @@ def run_training(args: argparse.Namespace):
                 print(f"  Step {steps_done}/{args.train_steps_per_iteration}, Loss: {metrics['total_loss']:.4f}")
                 
                 if args.use_wandb:
-                    wandb.log({
+                    log_dict = {
                         "train/step": trainer.global_step,
                         "train/loss": metrics["total_loss"],
                         "train/color_loss": metrics["color_loss"],
@@ -418,7 +452,19 @@ def run_training(args: argparse.Namespace):
                         "train/rank_accuracy": metrics["rank_accuracy"],
                         "train/action_accuracy": metrics["action_accuracy"],
                         "train/learning_rate": metrics["learning_rate"],
-                    })
+                    }
+                    
+                    # Add MCTS-specific metrics if in MCTS mode
+                    if args.training_mode == "mcts":
+                        log_dict.update({
+                            "train/policy_loss": metrics.get("policy_loss", 0.0),
+                            "train/value_loss": metrics.get("value_loss", 0.0),
+                            "train/value_mae": metrics.get("value_mae", 0.0),
+                            "train/mean_reward": metrics.get("mean_reward", 0.0),
+                            "train/mean_value_pred": metrics.get("mean_value_pred", 0.0),
+                        })
+                    
+                    wandb.log(log_dict)
         
         train_time = time.time() - train_start
         print(f"Training completed in {train_time:.2f}s")
@@ -489,6 +535,13 @@ def main():
     parser.add_argument("--color-loss-weight", type=float, default=1.0, help="Color prediction loss weight")
     parser.add_argument("--rank-loss-weight", type=float, default=1.0, help="Rank prediction loss weight")
     parser.add_argument("--action-loss-weight", type=float, default=1.0, help="Action prediction loss weight")
+    parser.add_argument("--value-loss-weight", type=float, default=1.0, help="Value prediction loss weight")
+    parser.add_argument("--policy-loss-weight", type=float, default=1.0, help="MCTS policy distillation loss weight")
+    
+    # Training mode
+    parser.add_argument("--training-mode", type=str, default="supervised", 
+                        choices=["supervised", "mcts"],
+                        help="Training mode: 'supervised' (cross-entropy with chosen actions) or 'mcts' (policy distillation from MCTS)")
     
     # Self-play parameters
     parser.add_argument("--num-workers", type=int, default=0, help="Number of worker processes (0 = auto)")
@@ -507,6 +560,14 @@ def main():
     parser.add_argument("--epsilon", type=float, default=0.1, help="Epsilon for epsilon-greedy")
     parser.add_argument("--epsilon-decay", type=float, default=0.01, help="Epsilon decay per iteration")
     parser.add_argument("--min-epsilon", type=float, default=0.01, help="Minimum epsilon")
+    
+    # MCTS parameters (used when training_mode=mcts)
+    parser.add_argument("--mcts-simulations", type=int, default=100, help="Number of MCTS simulations per move")
+    parser.add_argument("--c-puct", type=float, default=1.4, help="PUCT exploration constant")
+    parser.add_argument("--temperature-drop-move", type=int, default=30, help="Move number after which temperature drops to 0")
+    parser.add_argument("--dirichlet-alpha", type=float, default=0.3, help="Dirichlet noise alpha for root exploration")
+    parser.add_argument("--dirichlet-weight", type=float, default=0.25, help="Weight for Dirichlet noise at root")
+    parser.add_argument("--top-k-actions", type=int, default=10, help="Number of top actions to expand in MCTS")
     
     # Logging
     parser.add_argument("--log-interval", type=int, default=100, help="Log every N steps")

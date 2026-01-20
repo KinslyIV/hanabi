@@ -25,6 +25,12 @@ class HanabiTrainer:
     """
     Trainer for the ActionDecoder model using self-play data.
     Integrates with WandB for experiment tracking.
+    
+    Supports two training modes:
+    1. Supervised: Train action head against chosen actions (imitation learning)
+    2. MCTS: Train action head against MCTS policy targets (AlphaZero-style)
+    
+    Both modes train the value head against game outcome rewards.
     """
     
     def __init__(
@@ -64,6 +70,11 @@ class HanabiTrainer:
         self.color_loss_weight = config.get("color_loss_weight", 1.0)
         self.rank_loss_weight = config.get("rank_loss_weight", 1.0)
         self.action_loss_weight = config.get("action_loss_weight", 1.0)
+        self.value_loss_weight = config.get("value_loss_weight", 1.0)
+        self.policy_loss_weight = config.get("policy_loss_weight", 1.0)
+        
+        # Training mode: 'supervised' or 'mcts'
+        self.training_mode = config.get("training_mode", "supervised")
         
         # Training state
         self.global_step = 0
@@ -76,6 +87,8 @@ class HanabiTrainer:
             "color_loss": [],
             "rank_loss": [],
             "action_loss": [],
+            "policy_loss": [],
+            "value_loss": [],
             "color_accuracy": [],
             "rank_accuracy": [],
             "action_accuracy": [],
@@ -85,7 +98,14 @@ class HanabiTrainer:
         self,
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute losses for a batch of transitions."""
+        """Compute losses for a batch of transitions.
+        
+        Computes:
+        - Color/Rank prediction losses (belief state learning)
+        - Action loss: Either supervised (cross-entropy with chosen action) or
+                       MCTS policy distillation (cross-entropy with MCTS policy)
+        - Value loss: MSE between predicted value and game outcome reward
+        """
         
         # Move batch to device
         slot_beliefs = batch["slot_beliefs"].to(self.device)
@@ -100,9 +120,15 @@ class HanabiTrainer:
         chosen_action_idx = batch["chosen_action_idx"].to(self.device)
         legal_moves_mask = batch["legal_moves_mask"].to(self.device)
         hand_size = batch["hand_size"].to(self.device)
+        reward = batch["reward"].to(self.device)  # [B] normalized final score
+        
+        # Get MCTS policy if available (for MCTS training mode)
+        mcts_policy = batch.get("mcts_policy")
+        if mcts_policy is not None:
+            mcts_policy = mcts_policy.to(self.device)
         
         # Forward pass
-        color_logits, rank_logits, action_logits = self.model(
+        color_logits, rank_logits, action_logits, value = self.model(
             slot_beliefs=slot_beliefs,
             affected_mask=affected_mask,
             move_target_player=move_target_player,
@@ -148,7 +174,7 @@ class HanabiTrainer:
         )
         rank_loss = (rank_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
         
-        # Action prediction loss
+        # ========== Action/Policy Loss ==========
         # Mask illegal actions with large negative values
         action_logits_masked = action_logits.clone()
         action_logits_masked[~legal_moves_mask.bool()] = -1e9
@@ -157,18 +183,50 @@ class HanabiTrainer:
         max_action_idx = action_logits.size(-1) - 1
         chosen_action_idx_clamped = chosen_action_idx.clamp(0, max_action_idx)
         
-        action_loss = F.cross_entropy(
-            action_logits_masked,
-            chosen_action_idx_clamped,
-            reduction='mean'
-        )
+        # Compute action loss based on training mode
+        if self.training_mode == "mcts" and mcts_policy is not None:
+            # MCTS policy distillation: cross-entropy with MCTS policy targets
+            # policy_loss = -sum(mcts_policy * log_softmax(action_logits))
+            log_probs = F.log_softmax(action_logits_masked, dim=-1)
+            
+            # Ensure MCTS policy is valid (sum to 1, non-negative)
+            mcts_policy_valid = mcts_policy.clamp(min=1e-8)
+            mcts_policy_valid = mcts_policy_valid / (mcts_policy_valid.sum(dim=-1, keepdim=True) + 1e-8)
+            
+            # Cross-entropy loss: -sum(target * log(pred))
+            policy_loss = -(mcts_policy_valid * log_probs).sum(dim=-1).mean()
+            
+            # Supervised action loss (for metrics, using chosen action)
+            action_loss = F.cross_entropy(
+                action_logits_masked,
+                chosen_action_idx_clamped,
+                reduction='mean'
+            )
+        else:
+            # Supervised mode: cross-entropy with chosen action
+            action_loss = F.cross_entropy(
+                action_logits_masked,
+                chosen_action_idx_clamped,
+                reduction='mean'
+            )
+            policy_loss = action_loss  # Same as action loss in supervised mode
         
-        # Total loss
+        # ========== Value Loss ==========
+        # MSE between predicted value and reward (normalized final score)
+        value_loss = F.mse_loss(value, reward)
+        
+        # ========== Total Loss ==========
         total_loss = (
             self.color_loss_weight * color_loss +
             self.rank_loss_weight * rank_loss +
-            self.action_loss_weight * action_loss
+            self.value_loss_weight * value_loss
         )
+        
+        # Add policy loss based on mode
+        if self.training_mode == "mcts" and mcts_policy is not None:
+            total_loss = total_loss + self.policy_loss_weight * policy_loss
+        else:
+            total_loss = total_loss + self.action_loss_weight * action_loss
         
         # Compute accuracies
         with torch.no_grad():
@@ -181,19 +239,26 @@ class HanabiTrainer:
             rank_acc = rank_correct.sum().float() / (valid_mask_flat.sum() + 1e-8)
             
             # For action accuracy, use masked logits to get legal predictions
-            # but compute accuracy to see if model predicts the chosen legal action
             action_preds = action_logits_masked.argmax(dim=-1)
             action_correct = (action_preds == chosen_action_idx_clamped)
             action_acc = action_correct.float().mean()
+            
+            # Value prediction metrics
+            value_mae = (value - reward).abs().mean()
         
         metrics = {
             "total_loss": total_loss.item(),
             "color_loss": color_loss.item(),
             "rank_loss": rank_loss.item(),
             "action_loss": action_loss.item(),
+            "policy_loss": policy_loss.item(),
+            "value_loss": value_loss.item(),
             "color_accuracy": color_acc.item(),
             "rank_accuracy": rank_acc.item(),
             "action_accuracy": action_acc.item(),
+            "value_mae": value_mae.item(),
+            "mean_reward": reward.mean().item(),
+            "mean_value_pred": value.mean().item(),
         }
         
         return total_loss, metrics

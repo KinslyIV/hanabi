@@ -57,6 +57,9 @@ class Transition:
     chosen_action_idx: int            # Index of chosen action
     legal_moves_mask: np.ndarray      # [action_space_size] - mask of legal moves
     
+    # MCTS policy target (optional - only set when using MCTS data collection)
+    mcts_policy: Optional[np.ndarray] = None  # [action_space_size] - MCTS visit count distribution
+    
     # Metadata
     game_config: Dict[str, int] = field(default_factory=dict)
     reward: float = 0.0               # Normalized final score reward
@@ -337,7 +340,7 @@ class GameSimulator:
         acting_player_tensor = torch.tensor([player_offset], dtype=torch.long, device=self.device)
         
         with torch.no_grad():
-            _, _, action_logits = self.model(
+            _, _, action_logits, _ = self.model(
                 slot_beliefs=slot_beliefs_tensor,
                 affected_mask=affected_mask_tensor,
                 move_target_player=target_player_tensor,

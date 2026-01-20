@@ -38,6 +38,7 @@ from rl_hanabi.training.game_simulator import (
     GameResult,
     sample_game_config,
 )
+from rl_hanabi.training.mcts_simulator import MCTSGameSimulator
 from rl_hanabi.training.data_collection import ReplayBuffer, create_dataloader
 
 # Configure logging
@@ -154,13 +155,30 @@ def game_worker(
     model.to(device)
     model.eval()
     
-    # Create simulator
-    simulator = GameSimulator(
-        model=model,
-        device=device,
-        temperature=simulation_config.get("temperature", 1.0),
-        epsilon=simulation_config.get("epsilon", 0.1),
-    )
+    # Check training mode for simulator selection
+    training_mode = simulation_config.get("training_mode", "supervised")
+    
+    if training_mode == "mcts":
+        # Use MCTS simulator for AlphaZero-style training
+        simulator = MCTSGameSimulator(
+            model=model,
+            device=device,
+            mcts_simulations=simulation_config.get("mcts_simulations", 100),
+            c_puct=simulation_config.get("c_puct", 1.4),
+            temperature=simulation_config.get("temperature", 1.0),
+            temperature_drop_move=simulation_config.get("temperature_drop_move", 30),
+            dirichlet_alpha=simulation_config.get("dirichlet_alpha", 0.3),
+            dirichlet_weight=simulation_config.get("dirichlet_weight", 0.25),
+            top_k_actions=simulation_config.get("top_k_actions", 10),
+        )
+    else:
+        # Use standard simulator for supervised learning
+        simulator = GameSimulator(
+            model=model,
+            device=device,
+            temperature=simulation_config.get("temperature", 1.0),
+            epsilon=simulation_config.get("epsilon", 0.1),
+        )
     
     games_played = 0
     
@@ -185,6 +203,8 @@ def game_worker(
                 logger.debug(f"[Worker {worker_id}] Completed {games_played} games")
         except Exception as e:
             logger.error(f"[Worker {worker_id}] Error: {e}")
+            import traceback
+            traceback.print_exc()
             continue
     
     logger.info(f"[Worker {worker_id}] Shutting down after {games_played} games")
@@ -391,7 +411,7 @@ class DistributedCoordinator:
                         logger.info(f"  Step {steps_done}/{num_steps}, Loss: {avg_loss:.4f}")
                         
                         if self.use_wandb:
-                            wandb.log({ # type: ignore
+                            log_dict = {
                                 "train/step": self.state.total_train_steps,
                                 "train/loss": metrics["total_loss"],
                                 "train/color_loss": metrics.get("color_loss", 0),
@@ -401,7 +421,18 @@ class DistributedCoordinator:
                                 "train/rank_accuracy": metrics.get("rank_accuracy", 0),
                                 "train/action_accuracy": metrics.get("action_accuracy", 0),
                                 "train/learning_rate": metrics.get("learning_rate", 0),
-                            })
+                            }
+                            
+                            # Add MCTS-specific metrics if available
+                            if "policy_loss" in metrics:
+                                log_dict.update({
+                                    "train/policy_loss": metrics.get("policy_loss", 0),
+                                    "train/value_loss": metrics.get("value_loss", 0),
+                                    "train/value_mae": metrics.get("value_mae", 0),
+                                    "train/mean_value_pred": metrics.get("mean_value_pred", 0),
+                                })
+                            
+                            wandb.log(log_dict) # type: ignore
                 
                 except Exception as e:
                     logger.error(f"Training step failed: {e}")
@@ -740,6 +771,14 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
             "temperature": args.temperature,
             "epsilon": args.epsilon,
             "collect_all_perspectives": True,
+            "training_mode": args.training_mode,
+            # MCTS-specific settings
+            "mcts_simulations": args.mcts_simulations,
+            "c_puct": args.c_puct,
+            "temperature_drop_move": args.temperature_drop_move,
+            "dirichlet_alpha": args.dirichlet_alpha,
+            "dirichlet_weight": args.dirichlet_weight,
+            "top_k_actions": args.top_k_actions,
         }
     
     # Game config ranges
@@ -914,6 +953,18 @@ def main():
     parser.add_argument("--epsilon", type=float, default=0.1, help="Epsilon-greedy")
     parser.add_argument("--epsilon-decay", type=float, default=0.01, help="Epsilon decay")
     parser.add_argument("--min-epsilon", type=float, default=0.01, help="Minimum epsilon")
+    
+    # Training mode
+    parser.add_argument("--training-mode", type=str, choices=["supervised", "mcts"], default="supervised",
+                       help="Training mode: 'supervised' (cross-entropy) or 'mcts' (policy distillation)")
+    
+    # MCTS parameters (used when training_mode=mcts)
+    parser.add_argument("--mcts-simulations", type=int, default=100, help="MCTS simulations per move")
+    parser.add_argument("--c-puct", type=float, default=1.4, help="PUCT exploration constant")
+    parser.add_argument("--temperature-drop-move", type=int, default=30, help="Move after which temperature drops to 0")
+    parser.add_argument("--dirichlet-alpha", type=float, default=0.3, help="Dirichlet noise alpha")
+    parser.add_argument("--dirichlet-weight", type=float, default=0.25, help="Dirichlet noise weight")
+    parser.add_argument("--top-k-actions", type=int, default=10, help="Top actions to expand in MCTS")
     
     # Logging
     parser.add_argument("--log-interval", type=int, default=100, help="Log every N steps")

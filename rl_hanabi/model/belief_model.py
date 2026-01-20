@@ -58,6 +58,17 @@ class ActionDecoder(nn.Module):
             nn.Linear(d_model, action_space_size),
         )
 
+        # Value head for MCTS integration
+        # Outputs a single scalar value estimate (expected normalized score)
+        self.value_head = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model // 2),
+            nn.ReLU(),
+            nn.Linear(d_model // 2, 1),
+            nn.Sigmoid(),  # Output in [0, 1] representing normalized expected score
+        )
+
 
     def forward(self,
                 slot_beliefs,     # [B, P, H, C+R]
@@ -144,5 +155,6 @@ class ActionDecoder(nn.Module):
 
         global_repr = x[:, -1]
         action_logits = self.action_head(global_repr)     # [B, action_space_size]
+        value = self.value_head(global_repr).squeeze(-1)  # [B]
 
-        return color_logits, rank_logits, action_logits
+        return color_logits, rank_logits, action_logits, value

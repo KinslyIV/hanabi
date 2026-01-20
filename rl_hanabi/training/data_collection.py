@@ -306,6 +306,22 @@ class HanabiDataset(Dataset):
         true_colors[:valid_len] = t.true_colors[:valid_len]
         true_ranks[:valid_len] = t.true_ranks[:valid_len]
         
+        # Process MCTS policy if available
+        # Remap MCTS policy to match the remapped action space
+        mcts_policy = np.zeros(self.max_action_space_size, dtype=np.float32)
+        if t.mcts_policy is not None:
+            orig_action_space_size = len(t.mcts_policy)
+            for orig_idx in range(orig_action_space_size):
+                if t.mcts_policy[orig_idx] > 0:
+                    new_idx = self._remap_action_index(
+                        orig_idx, num_players, num_colors, num_ranks, hand_size
+                    )
+                    if new_idx < self.max_action_space_size:
+                        mcts_policy[new_idx] = t.mcts_policy[orig_idx]
+            # Re-normalize after remapping
+            if mcts_policy.sum() > 0:
+                mcts_policy = mcts_policy / mcts_policy.sum()
+        
         return {
             "slot_beliefs": torch.from_numpy(slot_beliefs),
             "affected_mask": torch.from_numpy(affected_mask),
@@ -318,6 +334,7 @@ class HanabiDataset(Dataset):
             "true_ranks": torch.from_numpy(true_ranks),
             "chosen_action_idx": torch.tensor(chosen_action_idx_remapped, dtype=torch.long),
             "legal_moves_mask": torch.from_numpy(legal_moves_mask),
+            "mcts_policy": torch.from_numpy(mcts_policy),
             "reward": torch.tensor(t.reward, dtype=torch.float32),
             "step_reward": torch.tensor(getattr(t, 'step_reward', 0.0), dtype=torch.float32),
             "failed_play": torch.tensor(t.failed_play, dtype=torch.bool),
