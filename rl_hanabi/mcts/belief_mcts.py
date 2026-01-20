@@ -9,6 +9,7 @@ policy head to focus on promising moves and the value head for leaf evaluation.
 import math
 import time
 import logging
+from dataclasses import dataclass
 from typing import Tuple, Optional, List
 import numpy as np
 import torch
@@ -17,6 +18,41 @@ from rl_hanabi.game.hle_state import HLEGameState
 from rl_hanabi.belief.belief_state import BeliefState
 from rl_hanabi.model.belief_model import ActionDecoder
 from hanabi_learning_environment.pyhanabi import HanabiMove
+
+
+@dataclass
+class SearchTransition:
+    """
+    A transition collected during MCTS search ("thinking" transition).
+    
+    These transitions represent states explored during search that weren't
+    actually played in the game, but provide additional training signal
+    about what the model's policy and value should be at those states.
+    """
+    # State information (same format as game transitions)
+    slot_beliefs: np.ndarray          # [P, H, C+R] - belief state
+    affected_mask: np.ndarray         # [P, H] - mask for last action
+    move_target_player: int           # target player offset
+    acting_player: int                # acting player offset  
+    action: np.ndarray                # [action_dim] - last action encoding
+    fireworks: np.ndarray             # [C] - current fireworks
+    discard_pile: np.ndarray          # [C*R] - discard pile
+    
+    # Targets for training
+    true_colors: np.ndarray           # [H] - true colors of observer's hand
+    true_ranks: np.ndarray            # [H] - true ranks of observer's hand
+    legal_moves_mask: np.ndarray      # [action_space_size] - mask of legal moves
+    
+    # MCTS-derived targets
+    policy_prior: np.ndarray          # [action_space_size] - neural network policy
+    value_estimate: float             # Value estimate from neural network
+    
+    # Visit count info (if node was visited multiple times)
+    visit_count: int = 1              # How many times this node was visited
+    
+    # Metadata
+    game_config: Optional[dict] = None  # Game configuration
+    search_depth: int = 0             # Depth in search tree
 
 
 logger = logging.getLogger(__name__)
@@ -134,6 +170,8 @@ class BeliefMCTS:
         dirichlet_alpha: float = 0.3,
         dirichlet_weight: float = 0.25,
         top_k_actions: int = 10,  # Only expand top-k actions by prior
+        collect_search_transitions: bool = False,  # Collect transitions from search
+        min_visits_for_search_transition: int = 1,  # Minimum visits to collect a transition
     ):
         """
         Args:
@@ -146,6 +184,8 @@ class BeliefMCTS:
             dirichlet_alpha: Dirichlet noise alpha for root exploration
             dirichlet_weight: Weight for Dirichlet noise at root
             top_k_actions: Only expand top-k actions by policy prior
+            collect_search_transitions: If True, collect transitions from states visited during search
+            min_visits_for_search_transition: Minimum visit count for a node to be collected
         """
         self.model = model
         self.device = device
@@ -162,6 +202,12 @@ class BeliefMCTS:
         self.max_num_ranks = model.max_num_ranks
         self.max_hand_size = model.max_hand_size
         self.max_num_players = model.max_num_players
+        
+        # Search transition collection settings
+        self.collect_search_transitions = collect_search_transitions
+        self.min_visits_for_search_transition = min_visits_for_search_transition
+        self.search_transitions: List[SearchTransition] = []
+        self._game_config: Optional[dict] = None  # Set when collecting transitions
         
         self.root: Optional[BeliefNode] = None
         
@@ -358,16 +404,142 @@ class BeliefMCTS:
             node.value_sum += value
             node = node.parent
     
-    def init_root(self, state: HLEGameState, belief_states: List[BeliefState]):
+    def _create_search_transition(
+        self, 
+        node: BeliefNode, 
+        policy: np.ndarray, 
+        value: float,
+        depth: int = 0,
+    ) -> Optional[SearchTransition]:
+        """
+        Create a SearchTransition from a node that was visited during MCTS.
+        
+        Args:
+            node: The BeliefNode to create a transition from
+            policy: The policy priors from neural network evaluation
+            value: The value estimate from neural network evaluation  
+            depth: Depth in the search tree
+            
+        Returns:
+            SearchTransition or None if creation fails
+        """
+        if self._game_config is None:
+            return None
+            
+        try:
+            belief_state = node.belief_state
+            state = node.state
+            player = belief_state.player
+            num_players = belief_state.num_players
+            
+            # Get observations from belief state
+            all_hands, fireworks, discard_pile_one_hot, tokens = belief_state.prepare_belief_obs(player)
+            action_encoding, affected_mask = belief_state.encode_last_action()
+            
+            # Get ground truth for observer's hand
+            observer_hand = state.get_hands()[player]
+            true_colors = np.array([card.color() for card in observer_hand], dtype=np.int64)
+            true_ranks = np.array([card.rank() for card in observer_hand], dtype=np.int64)
+            
+            # Get player offsets
+            player_idx, target_idx = belief_state.get_last_player_and_target_index()
+            player_offset = (player_idx - player) % num_players
+            target_offset = (target_idx - player) % num_players
+            
+            # Pad ground truth if needed
+            hand_size = self._game_config.get("hand_size", len(true_colors))
+            if len(true_colors) < hand_size:
+                pad_size = hand_size - len(true_colors)
+                true_colors = np.pad(true_colors, (0, pad_size), constant_values=-1)
+                true_ranks = np.pad(true_ranks, (0, pad_size), constant_values=-1)
+            
+            return SearchTransition(
+                slot_beliefs=all_hands,
+                affected_mask=affected_mask,
+                move_target_player=target_offset,
+                acting_player=player_offset,
+                action=action_encoding,
+                fireworks=fireworks,
+                discard_pile=discard_pile_one_hot,
+                true_colors=true_colors,
+                true_ranks=true_ranks,
+                legal_moves_mask=node.valid_moves_mask.copy(),
+                policy_prior=policy.copy(),
+                value_estimate=value,
+                visit_count=node.n_visits,
+                game_config=self._game_config.copy(),
+                search_depth=depth,
+            )
+        except Exception as e:
+            logger.debug(f"Error creating search transition: {e}")
+            return None
+    
+    def _collect_tree_transitions(self, node: BeliefNode, depth: int = 0):
+        """
+        Recursively collect transitions from all nodes in the search tree.
+        
+        Only collects from nodes that:
+        - Have been expanded (have policy priors)
+        - Meet minimum visit count threshold
+        - Are not the root (root is handled separately as actual game transition)
+        """
+        if not self.collect_search_transitions:
+            return
+            
+        # Don't collect from root (that's the actual game transition)
+        # and don't collect from terminal nodes
+        if node.is_terminal:
+            return
+            
+        # Only collect if node has been expanded and visited enough
+        if (node.is_expanded 
+            and node.policy_priors is not None 
+            and node.n_visits >= self.min_visits_for_search_transition
+            and node.parent is not None):  # Skip root
+            
+            transition = self._create_search_transition(
+                node=node,
+                policy=node.policy_priors,
+                value=node.q_value,  # Use Q-value as value target (backed up from search)
+                depth=depth,
+            )
+            if transition is not None:
+                self.search_transitions.append(transition)
+        
+        # Recursively collect from children
+        for child in node.children.values():
+            self._collect_tree_transitions(child, depth + 1)
+    
+    def get_search_transitions(self) -> List[SearchTransition]:
+        """Get all search transitions collected during the last run."""
+        return self.search_transitions
+    
+    def clear_search_transitions(self):
+        """Clear collected search transitions."""
+        self.search_transitions = []
+    
+    def init_root(
+        self, 
+        state: HLEGameState, 
+        belief_states: List[BeliefState],
+        game_config: Optional[dict] = None,
+    ):
         """
         Initialize the root node with the current game state.
         
         Args:
             state: Current game state
             belief_states: List of belief states for each player (use current player's)
+            game_config: Game configuration dict (needed for search transition collection)
         """
         current_player = state.current_player_index
         belief_state = belief_states[current_player]
+        
+        # Store game config for search transition creation
+        self._game_config = game_config
+        
+        # Clear search transitions from previous run
+        self.clear_search_transitions()
         
         self.root = BeliefNode(
             state=state,
@@ -455,6 +627,11 @@ class BeliefMCTS:
                 policy /= policy.sum() + 1e-10
         
         logger.debug(f"MCTS completed {num_sims} simulations in {(time.time() - start_time)*1000:.1f}ms")
+        
+        # Collect search transitions from the tree (if enabled)
+        if self.collect_search_transitions:
+            self._collect_tree_transitions(self.root, depth=0)
+            logger.debug(f"Collected {len(self.search_transitions)} search transitions")
         
         return policy, self.root.q_value
     

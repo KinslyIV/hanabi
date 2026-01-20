@@ -3,7 +3,7 @@ from rl_hanabi.mcts.convention_rollout import (
     ConventionRolloutPolicy, 
     ParallelConventionRollout
 )
-from rl_hanabi.mcts.belief_mcts import BeliefMCTS, BeliefNode
+from rl_hanabi.mcts.belief_mcts import BeliefMCTS, BeliefNode, SearchTransition
 
 __all__ = [
     "MCTS",
@@ -12,4 +12,5 @@ __all__ = [
     "ParallelConventionRollout",
     "BeliefMCTS",
     "BeliefNode",
+    "SearchTransition",
 ]

@@ -21,7 +21,7 @@ from hanabi_learning_environment import pyhanabi
 from rl_hanabi.game.hle_state import HLEGameState
 from rl_hanabi.belief.belief_state import BeliefState
 from rl_hanabi.model.belief_model import ActionDecoder
-from rl_hanabi.mcts.belief_mcts import BeliefMCTS
+from rl_hanabi.mcts.belief_mcts import BeliefMCTS, SearchTransition
 from rl_hanabi.training.game_simulator import (
     GameConfig,
     Transition,
@@ -37,6 +37,9 @@ class MCTSGameSimulator:
     Unlike the basic GameSimulator that uses the policy network directly,
     this simulator runs MCTS to get improved policy targets for training.
     This enables AlphaZero-style policy improvement.
+    
+    Can also collect "search transitions" - states explored during MCTS thinking
+    that provide additional training signal without actually playing those moves.
     """
     
     def __init__(
@@ -51,6 +54,8 @@ class MCTSGameSimulator:
         dirichlet_alpha: float = 0.3,
         dirichlet_weight: float = 0.25,
         top_k_actions: int = 10,
+        collect_search_transitions: bool = True,  # Collect transitions from MCTS thinking
+        min_visits_for_search_transition: int = 5,  # Min visits to collect a search transition
     ):
         """
         Args:
@@ -64,6 +69,8 @@ class MCTSGameSimulator:
             dirichlet_alpha: Dirichlet noise alpha for root exploration
             dirichlet_weight: Weight for Dirichlet noise at root
             top_k_actions: Number of top actions to expand in MCTS
+            collect_search_transitions: If True, collect transitions from states explored during MCTS
+            min_visits_for_search_transition: Minimum visit count for a node to be collected as a search transition
         """
         self.model = model
         self.device = device
@@ -75,6 +82,8 @@ class MCTSGameSimulator:
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_weight = dirichlet_weight
         self.top_k_actions = top_k_actions
+        self.collect_search_transitions = collect_search_transitions
+        self.min_visits_for_search_transition = min_visits_for_search_transition
         
         # Model dimensions for padding
         self.max_num_colors = model.max_num_colors
@@ -94,13 +103,15 @@ class MCTSGameSimulator:
             dirichlet_alpha=self.dirichlet_alpha,
             dirichlet_weight=self.dirichlet_weight,
             top_k_actions=self.top_k_actions,
+            collect_search_transitions=self.collect_search_transitions,
+            min_visits_for_search_transition=self.min_visits_for_search_transition,
         )
     
     def simulate_game(
         self,
         config: GameConfig,
         collect_all_perspectives: bool = True,
-    ) -> GameResult:
+    ) -> Tuple[GameResult, List[SearchTransition]]:
         """
         Simulate a complete game using MCTS and collect transitions.
         
@@ -112,7 +123,9 @@ class MCTSGameSimulator:
             collect_all_perspectives: If True, collect transition from all players' perspectives
         
         Returns:
-            GameResult with all transitions and game statistics
+            Tuple of (GameResult, search_transitions):
+              - GameResult with all game transitions and statistics
+              - List of SearchTransition from MCTS thinking (empty if collect_search_transitions=False)
         """
         # Create game state
         state = HLEGameState.from_table_options(config.to_dict(), config.num_players)
@@ -124,7 +137,16 @@ class MCTSGameSimulator:
         ]
         
         transitions: List[Transition] = []
+        all_search_transitions: List[SearchTransition] = []
         num_turns = 0
+        
+        # Game config dict for search transitions
+        game_config_dict = {
+            "num_players": config.num_players,
+            "num_colors": config.num_colors,
+            "num_ranks": config.num_ranks,
+            "hand_size": config.hand_size,
+        }
         
         while not state.is_terminal():
             current_player = state.current_player_index
@@ -141,8 +163,12 @@ class MCTSGameSimulator:
             
             # Create MCTS and run search
             mcts = self._create_mcts(current_temp)
-            mcts.init_root(state, belief_states)
+            mcts.init_root(state, belief_states, game_config=game_config_dict)
             mcts_policy, mcts_value = mcts.run()
+            
+            # Collect search transitions from this MCTS run
+            if self.collect_search_transitions:
+                all_search_transitions.extend(mcts.get_search_transitions())
             
             # Select action from MCTS policy
             action_idx, move = mcts.select_action()
@@ -230,7 +256,7 @@ class MCTSGameSimulator:
         for t in transitions:
             t.reward = normalized_reward
         
-        return GameResult(
+        game_result = GameResult(
             transitions=transitions,
             final_score=final_score,
             max_possible_score=max_score,
@@ -242,6 +268,8 @@ class MCTSGameSimulator:
                 "hand_size": config.hand_size,
             },
         )
+        
+        return game_result, all_search_transitions
     
     def _create_transition(
         self,
@@ -347,8 +375,10 @@ def run_mcts_self_play(
     c_puct: float = 1.4,
     temperature: float = 1.0,
     collect_all_perspectives: bool = True,
+    collect_search_transitions: bool = False,
+    min_visits_for_search_transition: int = 2,
     verbose: bool = True,
-) -> List[GameResult]:
+) -> Tuple[List[GameResult], List[SearchTransition]]:
     """
     Run multiple games of self-play using MCTS.
     
@@ -361,10 +391,14 @@ def run_mcts_self_play(
         c_puct: PUCT exploration constant
         temperature: Temperature for action selection
         collect_all_perspectives: Collect data from all player perspectives
+        collect_search_transitions: Collect additional transitions from MCTS thinking
+        min_visits_for_search_transition: Minimum visit count for search transitions
         verbose: Print progress
     
     Returns:
-        List of GameResult objects
+        Tuple of (List[GameResult], List[SearchTransition]):
+          - List of GameResult objects from actual games
+          - List of SearchTransition objects from MCTS thinking (empty if disabled)
     """
     simulator = MCTSGameSimulator(
         model=model,
@@ -372,16 +406,20 @@ def run_mcts_self_play(
         mcts_simulations=mcts_simulations,
         c_puct=c_puct,
         temperature=temperature,
+        collect_search_transitions=collect_search_transitions,
+        min_visits_for_search_transition=min_visits_for_search_transition,
     )
     
     results = []
+    all_search_transitions: List[SearchTransition] = []
     total_score = 0
     total_max_score = 0
     
     for game_idx in range(num_games):
         game_config = config or sample_game_config()
-        result = simulator.simulate_game(game_config, collect_all_perspectives)
+        result, search_transitions = simulator.simulate_game(game_config, collect_all_perspectives)
         results.append(result)
+        all_search_transitions.extend(search_transitions)
         
         total_score += result.final_score
         total_max_score += result.max_possible_score
@@ -389,8 +427,9 @@ def run_mcts_self_play(
         if verbose and (game_idx + 1) % max(1, num_games // 10) == 0:
             avg_score = total_score / (game_idx + 1)
             avg_normalized = total_score / total_max_score if total_max_score > 0 else 0
+            search_info = f", Search transitions: {len(all_search_transitions)}" if collect_search_transitions else ""
             print(f"Game {game_idx + 1}/{num_games}: "
                   f"Score {result.final_score}/{result.max_possible_score}, "
-                  f"Avg: {avg_score:.1f}, Normalized: {avg_normalized:.2%}")
+                  f"Avg: {avg_score:.1f}, Normalized: {avg_normalized:.2%}{search_info}")
     
-    return results
+    return results, all_search_transitions
