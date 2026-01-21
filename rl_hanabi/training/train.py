@@ -133,8 +133,15 @@ def game_worker(
                 collect_all_perspectives=simulation_config.get("collect_all_perspectives", True),
             )
             
+            # MCTSGameSimulator returns (GameResult, List[SearchTransition])
+            # GameSimulator returns just GameResult
+            if isinstance(result, tuple):
+                game_result, _search_transitions = result
+            else:
+                game_result = result
+            
             # Put result in queue
-            result_queue.put((worker_id, result))
+            result_queue.put((worker_id, game_result))
             games_played += 1
             
             if games_played % 10 == 0:
@@ -176,10 +183,17 @@ def collect_results(
         
         try:
             worker_id, result = result_queue.get(timeout=0.5)
-            buffer.add_game_result(result)
+            
+            # Handle case where result might be a tuple (from MCTS mode)
+            if isinstance(result, tuple):
+                game_result = result[0]
+            else:
+                game_result = result
+            
+            buffer.add_game_result(game_result)
             
             # Track config distribution
-            config_key = f"p{result.game_config['num_players']}_c{result.game_config['num_colors']}_r{result.game_config['num_ranks']}"
+            config_key = f"p{game_result.game_config['num_players']}_c{game_result.game_config['num_colors']}_r{game_result.game_config['num_ranks']}"
             config_counts[config_key] += 1
             
             collected += 1

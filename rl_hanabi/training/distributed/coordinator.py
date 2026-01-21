@@ -196,7 +196,13 @@ def game_worker(
                 config=game_config,
                 collect_all_perspectives=simulation_config.get("collect_all_perspectives", True),
             )
-            result_queue.put((worker_id, result))
+            # MCTSGameSimulator returns (GameResult, List[SearchTransition])
+            # GameSimulator returns just GameResult
+            if isinstance(result, tuple):
+                game_result, _search_transitions = result
+            else:
+                game_result = result
+            result_queue.put((worker_id, game_result))
             games_played += 1
             
             if games_played % 10 == 0:
@@ -964,10 +970,10 @@ def main():
     parser.add_argument("--temperature-drop-move", type=int, default=30, help="Move after which temperature drops to 0")
     parser.add_argument("--dirichlet-alpha", type=float, default=0.3, help="Dirichlet noise alpha")
     parser.add_argument("--dirichlet-weight", type=float, default=0.25, help="Dirichlet noise weight")
-    parser.add_argument("--top-k-actions", type=int, default=10, help="Top actions to expand in MCTS")
+    parser.add_argument("--top-k-actions", type=int, default=5, help="Top actions to expand in MCTS")
     
     # Logging
-    parser.add_argument("--log-interval", type=int, default=100, help="Log every N steps")
+    parser.add_argument("--log-interval", type=int, default=10, help="Log every N steps")
     parser.add_argument("--save-interval", type=int, default=10, help="Save every N iterations")
     
     # WandB

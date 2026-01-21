@@ -564,35 +564,52 @@ class SearchTransitionDataset(Dataset):
         orig_ranks: int,
         orig_hand_size: int,
     ) -> int:
-        """Remap action index from original game config to max config."""
-        # Action layout: [Play(H), Discard(H), ColorClue(P-1,C), RankClue(P-1,R)]
-        orig_play_end = orig_hand_size
-        orig_discard_end = 2 * orig_hand_size
-        orig_color_clue_end = orig_discard_end + (orig_players - 1) * orig_colors
+        """Remap action index from original game config to max config.
         
-        max_play_end = self.max_hand_size
-        max_discard_end = 2 * self.max_hand_size
-        max_color_clue_end = max_discard_end + (self.max_num_players - 1) * self.max_num_colors
+        Action space layout:
+        - [0, H): Discard card i
+        - [H, 2H): Play card i
+        - [2H, 2H + (N-1)*C): Color clues: (player_offset-1)*C + color
+        - [2H + (N-1)*C, ...): Rank clues: (player_offset-1)*R + rank
+        """
+        H = orig_hand_size
+        N = orig_players
+        C = orig_colors
+        R = orig_ranks
         
-        if orig_idx < orig_play_end:
-            # Play action
-            return orig_idx
-        elif orig_idx < orig_discard_end:
-            # Discard action
-            card_idx = orig_idx - orig_play_end
-            return max_play_end + card_idx
-        elif orig_idx < orig_color_clue_end:
-            # Color clue
-            offset = orig_idx - orig_discard_end
-            player_offset = offset // orig_colors
-            color = offset % orig_colors
-            return max_discard_end + player_offset * self.max_num_colors + color
-        else:
-            # Rank clue
-            offset = orig_idx - orig_color_clue_end
-            player_offset = offset // orig_ranks
-            rank = offset % orig_ranks
-            return max_color_clue_end + player_offset * self.max_num_ranks + rank
+        max_H = self.max_hand_size
+        max_N = self.max_num_players
+        max_C = self.max_num_colors
+        max_R = self.max_num_ranks
+        
+        # Discard
+        if orig_idx < H:
+            return orig_idx  # Same index (card slot)
+        
+        # Play
+        if orig_idx < 2 * H:
+            card_idx = orig_idx - H
+            return max_H + card_idx
+        
+        # Color clues
+        color_clue_start = 2 * H
+        num_color_clues = (N - 1) * C
+        if orig_idx < color_clue_start + num_color_clues:
+            rel_idx = orig_idx - color_clue_start
+            player_offset_minus_1 = rel_idx // C  # 0 to N-2
+            color = rel_idx % C
+            # Map to max action space
+            max_color_clue_start = 2 * max_H
+            return max_color_clue_start + player_offset_minus_1 * max_C + color
+        
+        # Rank clues
+        rank_clue_start = color_clue_start + num_color_clues
+        rel_idx = orig_idx - rank_clue_start
+        player_offset_minus_1 = rel_idx // R
+        rank = rel_idx % R
+        # Map to max action space
+        max_rank_clue_start = 2 * max_H + (max_N - 1) * max_C
+        return max_rank_clue_start + player_offset_minus_1 * max_R + rank
     
     def _process_search_transition(self, t: SearchTransition) -> Dict[str, torch.Tensor]:
         """Process a search transition into tensors for training."""

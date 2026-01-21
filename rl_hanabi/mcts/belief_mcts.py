@@ -351,7 +351,7 @@ class BeliefMCTS:
             top_indices = sorted_indices[:min(self.top_k_actions, len(sorted_indices))]
             
             for action_idx in top_indices:
-                prior = policy[action_idx]
+                prior = float(policy[action_idx])
                 if prior > 1e-6:  # Only expand if prior is non-negligible
                     # Create child state
                     child_state = node.state.copy()
@@ -402,7 +402,7 @@ class BeliefMCTS:
         while node is not None:
             node.n_visits += 1
             node.value_sum += value
-            node = node.parent
+            node = node.parent # type: ignore
     
     def _create_search_transition(
         self, 
