@@ -103,7 +103,7 @@ def game_worker(
             temperature_drop_move=simulation_config.get("temperature_drop_move", 30),
             dirichlet_alpha=simulation_config.get("dirichlet_alpha", 0.3),
             dirichlet_weight=simulation_config.get("dirichlet_weight", 0.25),
-            top_k_actions=simulation_config.get("top_k_actions", 10),
+            top_k_actions=simulation_config.get("top_k_actions", 5),
         )
     else:
         # Use standard simulator for supervised learning
