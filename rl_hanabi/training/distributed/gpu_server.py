@@ -53,7 +53,7 @@ class GPUTrainer:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         # Import here to avoid circular imports
-        from rl_hanabi.model.belief_model import ActionDecoder
+        from rl_hanabi.model.action_decoder import ActionDecoder
         
         # Create model
         self.model = ActionDecoder(
@@ -421,7 +421,7 @@ class GPUTrainer:
             delete_checkpoints: If True, also delete all checkpoint files.
         """
         # Re-initialize model weights
-        from rl_hanabi.model.belief_model import ActionDecoder
+        from rl_hanabi.model.action_decoder import ActionDecoder
         
         self.model = ActionDecoder(
             num_colors=self.model_config["max_num_colors"],

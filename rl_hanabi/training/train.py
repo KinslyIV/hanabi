@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import wandb
 
-from rl_hanabi.model.belief_model import ActionDecoder
+from rl_hanabi.model.action_decoder import ActionDecoder
 from rl_hanabi.training.game_simulator import (
     GameSimulator,
     GameConfig,

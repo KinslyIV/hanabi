@@ -5,7 +5,7 @@ Tests for the ActionDecoder belief model.
 import pytest
 import torch
 import numpy as np
-from rl_hanabi.model.belief_model import ActionDecoder
+from rl_hanabi.model.action_decoder import ActionDecoder
 
 
 class TestActionDecoderInitialization:

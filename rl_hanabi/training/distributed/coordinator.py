@@ -135,7 +135,7 @@ def game_worker(
     simulation_config: Dict[str, Any],
 ):
     """Worker process that runs game simulations on CPU."""
-    from rl_hanabi.model.belief_model import ActionDecoder
+    from rl_hanabi.model.action_decoder import ActionDecoder
     
     logger.info(f"[Worker {worker_id}] Starting")
     

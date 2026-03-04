@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 import wandb
 
-from rl_hanabi.model.belief_model import ActionDecoder
+from rl_hanabi.model.action_decoder import ActionDecoder
 from rl_hanabi.training.data_collection import ReplayBuffer, create_dataloader
 
 

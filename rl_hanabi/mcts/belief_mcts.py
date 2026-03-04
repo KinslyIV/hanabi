@@ -16,7 +16,7 @@ import torch
 
 from rl_hanabi.game.hle_state import HLEGameState
 from rl_hanabi.belief.belief_state import BeliefState
-from rl_hanabi.model.belief_model import ActionDecoder
+from rl_hanabi.model.action_decoder import ActionDecoder
 from hanabi_learning_environment.pyhanabi import HanabiMove
 
 

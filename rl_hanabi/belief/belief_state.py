@@ -3,7 +3,7 @@ import torch
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 from rl_hanabi.game.hle_state import HLEGameState
-from rl_hanabi.model.belief_model import ActionDecoder
+from rl_hanabi.model.action_decoder import ActionDecoder
 from hanabi_learning_environment.pyhanabi import (
     HanabiCardKnowledge,
     HanabiCard,
