@@ -1,160 +1,224 @@
+from dataclasses import dataclass
+from typing import Optional
+
 import torch
 from torch import nn
+from torch.nn import functional as F
+
+from rl_hanabi.model.tokenizer import TokenizationConfig
+
+
+@dataclass(frozen=True)
+class ActionDecoderConfig:
+    num_colors: int
+    num_ranks: int
+    max_cards: int
+    hand_size: int
+    num_players: int
+    num_heads: int = 4
+    num_layers: int = 4
+    d_model: int = 128
+    action_dim: int = 4
+    dropout: float = 0.2
+    bias: bool = False
+
+
+
+class SelfAttention(nn.Module):
+
+    def __init__(self, config: ActionDecoderConfig):
+        super().__init__()
+        if config.d_model % config.num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
+
+        self.num_heads = config.num_heads
+        self.head_dim = config.d_model // config.num_heads
+        self.dropout = config.dropout
+
+        self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=config.bias)
+        self.proj = nn.Linear(config.d_model, config.d_model, bias=config.bias)
+
+    def forward(self, x):
+        batch_size, seq_len, embed_dim = x.shape
+        qkv = self.qkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        attn = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=False,
+        )
+
+        attn = attn.transpose(1, 2).contiguous().view(batch_size, seq_len, embed_dim)
+        return self.proj(attn)
+    
+
+class FeedForward(nn.Module):
+
+    def __init__(self, config: ActionDecoderConfig, n_layers=1, activation=nn.Module):
+        super().__init__()
+        self.n_layers = n_layers
+        self.activation = activation
+        self.net = nn.Sequential()
+
+        self.net.append(nn.Linear(config.d_model, config.d_model * 4))
+        self.net.append(self.activation())
+
+        for _ in range(self.n_layers - 1):
+            self.net.append(nn.Linear(config.d_model*4, config.d_model*4))
+            self.net.append(self.activation())
+
+        # Adding Projection
+        self.net.append(nn.Linear(config.d_model*4, config.d_model))
+
+        self.net.append(nn.Dropout(config.dropout))
+
+    def forward(self, x):
+        return self.net(x)
+    
+
+class Block(nn.Module):
+
+    def __init__(self, config : ActionDecoderConfig, n_ff_layers=1):
+        super().__init__()
+
+        self.multi_head = SelfAttention(config)
+        self.ffwd = FeedForward(config, n_layers=n_ff_layers, activation=nn.GELU)
+        self.ln1 = nn.LayerNorm(config.d_model, bias=config.bias)
+        self.ln2 = nn.LayerNorm(config.d_model, bias=config.bias)
+        
+
+    def forward(self, x):
+        x = x + self.multi_head(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
 
 class ActionDecoder(nn.Module):
 
-    def __init__(self, 
-                 max_num_colors: int, 
-                 max_num_ranks: int, 
-                 max_hand_size: int, 
-                 max_num_players: int,
-                 num_heads: int = 4,
-                 num_layers: int = 4,
-                 d_model: int = 128,
-                 action_dim: int = 4):
+    def __init__(
+        self,
+        config: Optional[ActionDecoderConfig] = None,
+        *,
+        num_colors: Optional[int] = None,
+        num_ranks: Optional[int] = None,
+        max_cards: Optional[int] = None,
+        hand_size: Optional[int] = None,
+        num_players: Optional[int] = None,
+        num_heads: int = 4,
+        num_layers: int = 4,
+        d_model: int = 128,
+        action_dim: int = 4,
+        token_config: TokenizationConfig,
+    ):
 
         super().__init__()
         
+        if config is None:
+            if num_colors is None or num_ranks is None or hand_size is None or num_players is None or max_cards is None:
+                raise ValueError("Provide either config or all max_* parameters")
+            config = ActionDecoderConfig(
+                num_colors=num_colors,
+                num_ranks=num_ranks,
+                max_cards=max_cards,
+                hand_size=hand_size,
+                num_players=num_players,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                d_model=d_model,
+                action_dim=action_dim,
+            )
+
         # Store max dimensions as instance attributes
-        self.max_num_colors = max_num_colors
-        self.max_num_ranks = max_num_ranks
-        self.max_hand_size = max_hand_size
-        self.max_num_players = max_num_players
+        self.num_colors = config.num_colors
+        self.num_ranks = config.num_ranks
+        self.hand_size = config.hand_size
+        self.num_players = config.num_players
+        self.config = config
 
-        self.slot_belief_proj = nn.Linear(max_num_colors + max_num_ranks, d_model)
-        self.act_proj  = nn.Linear(action_dim, d_model)
-        self.firework_proj = nn.Linear(max_num_colors, d_model)
-        self.discard_pile_proj = nn.Linear(max_num_colors * max_num_ranks, d_model)
+        self.hand_start = 3 + self.num_colors
+        self.hand_len = self.num_players * self.hand_size
 
-        self.slot_emb  = nn.Embedding(max_hand_size, d_model)
-        self.player_emb = nn.Embedding(max_num_players, d_model)
-        self.move_target_player_emb = nn.Embedding(1, d_model) 
-        self.affected_emb = nn.Embedding(2, d_model) # 0: unaffected, 1: affected
+        self.pad_token = token_config.pad_token
 
-        self.state_token = nn.Parameter(torch.randn(1, 1, d_model))
+        self.action_space_size = token_config.action_space_size
+        self.total_card_tokens = token_config.total_card_tokens
+        self.context_size = token_config.context_size
+
+        self.card_emb = nn.Embedding(self.total_card_tokens, config.d_model)
+        self.action_emb = nn.Embedding(self.action_space_size, config.d_model)
+        self.life_proj = nn.Linear(1, config.d_model)
+        self.info_proj = nn.Linear(1, config.d_model)
+        self.pos_emb = nn.Embedding(self.context_size, config.d_model)
+
+        self.card_action_head = nn.Linear(config.d_model, 4)
+
+        self.blocks = nn.ModuleList([Block(config) for _ in range(config.num_layers)])
+        self.dropout = nn.Dropout(config.dropout)
+        self.ln = nn.LayerNorm(config.d_model, bias=config.bias)
+
+        self._prev_tokens = None
+        self._prev_out = None
 
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=num_heads,
-            dim_feedforward=4 * d_model,
-            batch_first=True,
-        )
+    def reset_cache(self) -> None:
+        self._prev_tokens = None
+        self._prev_out = None
 
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer, num_layers
-        )
+
+    def forward(self, x: torch.Tensor, *, use_cache: bool = True, detach_cache: bool = True) -> torch.Tensor:
+        if x.dtype != torch.long:
+            x = x.long()
+
+        if x.size(1) < 3:
+            raise ValueError("Expected at least 3 tokens: life, info, action")
+        if x.size(1) > self.context_size:
+            raise ValueError("Sequence length exceeds context_size")
+        if x.size(1) < self.context_size:
+            pad_len = self.context_size - x.size(1)
+            x = F.pad(x, (0, pad_len), value=self.pad_token)
+
+        token_ids = x
+
+        life_tokens = x[:, 0].float().unsqueeze(-1)
+        info_tokens = x[:, 1].float().unsqueeze(-1)
+        action_tokens = x[:, 2]
+        card_tokens = x[:, 3:]
+
+        life_emb = self.life_proj(life_tokens).unsqueeze(1)
+        info_emb = self.info_proj(info_tokens).unsqueeze(1)
+        action_emb = self.action_emb(action_tokens).unsqueeze(1)
+        card_emb = self.card_emb(card_tokens)
+
+        x = torch.cat([life_emb, info_emb, action_emb, card_emb], dim=1)
+
+        pos = torch.arange(x.size(1), device=x.device).unsqueeze(0)
+        x = x + self.pos_emb(pos)
+
+        if use_cache and self._prev_out is not None and self._prev_tokens is not None:
+            same_mask = (self._prev_tokens == token_ids)
+            same_mask = same_mask & (token_ids != self.pad_token)
+            cache = self._prev_out.detach() if detach_cache else self._prev_out
+            x = x + cache * same_mask.unsqueeze(-1)
+
+        x = self.dropout(x)
+        for block in self.blocks:
+            x = block(x)
+        x = self.ln(x)
+        if use_cache:
+            self._prev_tokens = token_ids.detach()
+            self._prev_out = x
+
         
-        self.color_head = nn.Linear(d_model, max_num_colors)
-        self.rank_head  = nn.Linear(d_model, max_num_ranks)
+        hand_end = min(self.hand_start + self.hand_len, x.size(1))
+        if self.hand_start >= hand_end:
+            raise ValueError("Hand token range is empty for action head")
 
-        action_space_size = 2 * max_hand_size + (max_num_players - 1) * max_num_colors + (max_num_players - 1) * max_num_ranks
-
-        self.action_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, action_space_size),
-        )
-
-        # Value head for MCTS integration
-        # Outputs a single scalar value estimate (expected normalized score)
-        self.value_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, d_model // 2),
-            nn.ReLU(),
-            nn.Linear(d_model // 2, 1),
-            nn.Sigmoid(),  # Output in [0, 1] representing normalized expected score
-        )
-
-
-    def forward(self,
-                slot_beliefs,     # [B, P, H, C+R]
-                affected_mask,    # [B, P, H]     (0/1)
-                move_target_player, # [B]
-                acting_player,    # [B]
-                action,           # [B, action_dim]
-                fireworks,        # [B, C]
-                discard_pile,     # [B, C*R]
-            ):
-        device = slot_beliefs.device
-        B, P, H, _ = slot_beliefs.shape
-
-        # --------------------------------------------------
-        # 1. Flatten player × slot into slot tokens
-        # --------------------------------------------------
-        slot_beliefs = slot_beliefs.view(B, P * H, -1)      # [B, P*H, C+R]
-        x = self.slot_belief_proj(slot_beliefs)             # [B, P*H, d_model]
-
-        # --------------------------------------------------
-        # 2. Slot index embedding (position in hand)
-        # --------------------------------------------------
-        slot_ids = torch.arange(H, device=device).repeat(P)         # [P*H]
-        slot_ids = slot_ids.unsqueeze(0).expand(B, P * H)           # [B, P*H]
-        x = x + self.slot_emb(slot_ids)
-
-        # --------------------------------------------------
-        # 3. Player ownership embedding (who owns this slot)
-        # --------------------------------------------------
-        player_ids = torch.arange(P, device=device).repeat_interleave(H)
-        player_ids = player_ids.unsqueeze(0).expand(B, P * H)
-        x = x + self.player_emb(player_ids)
-
-        # --------------------------------------------------
-        # 4. Move target embedding (all slots of the move-target hand)
-        # --------------------------------------------------
-        # compute hand indices of the move target
-        hand_start = move_target_player * H
-        hand_end   = hand_start + H
-
-
-        slot_indices = torch.arange(P*H, device=move_target_player.device).unsqueeze(0)  # [1, P*H]
-        # broadcasted to [B, P*H] automatically
-        # compare with start/end to make mask
-        move_target_mask = (slot_indices >= hand_start.unsqueeze(1)) & (slot_indices < hand_end.unsqueeze(1))
-        mask = move_target_mask.unsqueeze(-1).float()  # [B, P*H, 1]
-        x = x + self.move_target_player_emb(torch.zeros(1, dtype=torch.long, device=device)) * mask   
-
-
-        # --------------------------------------------------
-        # 5. Affected-slot embedding (only slots affected by the move)
-        # --------------------------------------------------
-        affected = affected_mask.view(B, P*H).long()  # 1 where slot is affected
-        x = x + self.affected_emb(affected)  # broadcasted only to affected slots
-
-        # --------------------------------------------------
-        # 6. Global conditioning (acting player + action)
-        # --------------------------------------------------
-        global_tokens = torch.stack([
-            self.player_emb(acting_player),
-            self.act_proj(action),
-            self.firework_proj(fireworks),
-            self.discard_pile_proj(discard_pile)], dim=1)   # [B, 4, d_model]
-
-        x = torch.cat([x, global_tokens], dim=1)            # [B, P*H + 4, d_model]
-        state_token = self.state_token.expand(B, -1, -1)
-        x = torch.cat([x, state_token], dim=1)              # [B, P*H + 5, d_model]
-
-        # --------------------------------------------------
-        # 7. Transformer
-        # --------------------------------------------------
-        x = self.transformer(x)                              # [B, P*H + 5, d_model]
-
-        # --------------------------------------------------
-        # 8. Decode first hand's slots
-        # --------------------------------------------------
-        hand_index = 0 # the hand index to be predicted is always the first
-        start = hand_index * H
-        end   = start + H
-        hand_repr = x[:, start:end, :]
-
-        color_logits = self.color_head(hand_repr)          # [B, num_colors]
-        rank_logits  = self.rank_head(hand_repr)           # [B, num_ranks]
-
-        global_repr = x[:, -1]
-        action_logits = self.action_head(global_repr)     # [B, action_space_size]
-        value = self.value_head(global_repr).squeeze(-1)  # [B]
-
-        return color_logits, rank_logits, action_logits, value
+        hand_hidden = x[:, self.hand_start:hand_end, :]
+        card_action_logits = self.card_action_head(hand_hidden)
+        return card_action_logits
