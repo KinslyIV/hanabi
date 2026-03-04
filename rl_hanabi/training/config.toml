@@ -22,6 +22,8 @@ max_players = 5
 max_colors = 5
 max_ranks = 5
 max_hand_size = 5
+max_info_tokens = 8
+max_life_tokens = 3
 
 # Transformer architecture
 num_heads = 4
@@ -42,11 +44,6 @@ max_grad_norm = 1.0
 scheduler_t0 = 1000
 scheduler_t_mult = 2
 min_lr = 1e-6
-
-# Loss weights
-color_loss_weight = 1.0
-rank_loss_weight = 1.0
-action_loss_weight = 1.0
 
 # Batch size
 batch_size = 256
@@ -89,14 +86,11 @@ max_ranks = 5
 # Temperature for action sampling (higher = more random)
 temperature = 1.0
 
-# Epsilon for epsilon-greedy exploration
-epsilon = 0.1
+# Temperature decay per iteration (set to 0 to disable)
+temperature_decay = 0.01
 
-# Epsilon decay per iteration (set to 0 to disable)
-epsilon_decay = 0.01
-
-# Minimum epsilon
-min_epsilon = 0.01
+# Minimum temperature
+min_temperature = 0.1
 
 # =============================================================================
 # Logging and Checkpointing

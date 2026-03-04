@@ -9,15 +9,12 @@ import argparse
 import asyncio
 import json
 import logging
-import os
-import pickle
 import queue
 import random
 import signal
 import sys
 import time
 from collections import defaultdict
-from dataclasses import asdict
 from multiprocessing import Process, Queue, Event, cpu_count
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,14 +28,12 @@ try:
 except ImportError:
     HAS_WANDB = False
 
+from rl_hanabi.model.tokenizer import HLETokenizer, TokenizationConfig
 from rl_hanabi.training.distributed.gpu_client import GPUClient, GPUClientConfig
 from rl_hanabi.training.game_simulator import (
     GameSimulator,
-    GameConfig,
-    GameResult,
     sample_game_config,
 )
-from rl_hanabi.training.mcts_simulator import MCTSGameSimulator
 from rl_hanabi.training.data_collection import ReplayBuffer, create_dataloader
 
 # Configure logging
@@ -128,7 +123,7 @@ class TrainingState:
 def game_worker(
     worker_id: int,
     model_state_dict: Dict,
-    model_config: Dict[str, int],
+    model_config: Dict[str, Any],
     game_queue: Queue,
     result_queue: Queue,
     stop_event: Event, # type: ignore
@@ -141,44 +136,30 @@ def game_worker(
     
     # Create model for this worker (CPU only)
     device = torch.device("cpu")
+    token_config = model_config["token_config"]
     model = ActionDecoder(
         num_colors=model_config["max_num_colors"],
         num_ranks=model_config["max_num_ranks"],
+        max_cards=model_config["max_cards"],
         hand_size=model_config["max_hand_size"],
         num_players=model_config["max_num_players"],
         num_heads=model_config.get("num_heads", 4),
         num_layers=model_config.get("num_layers", 4),
         d_model=model_config.get("d_model", 128),
         action_dim=model_config.get("action_dim", 4),
+        token_config=token_config,
     )
     model.load_state_dict(model_state_dict)
     model.to(device)
     model.eval()
     
-    # Check training mode for simulator selection
-    training_mode = simulation_config.get("training_mode", "supervised")
-    
-    if training_mode == "mcts":
-        # Use MCTS simulator for AlphaZero-style training
-        simulator = MCTSGameSimulator(
-            model=model,
-            device=device,
-            mcts_simulations=simulation_config.get("mcts_simulations", 100),
-            c_puct=simulation_config.get("c_puct", 1.4),
-            temperature=simulation_config.get("temperature", 1.0),
-            temperature_drop_move=simulation_config.get("temperature_drop_move", 30),
-            dirichlet_alpha=simulation_config.get("dirichlet_alpha", 0.3),
-            dirichlet_weight=simulation_config.get("dirichlet_weight", 0.25),
-            top_k_actions=simulation_config.get("top_k_actions", 10),
-        )
-    else:
-        # Use standard simulator for supervised learning
-        simulator = GameSimulator(
-            model=model,
-            device=device,
-            temperature=simulation_config.get("temperature", 1.0),
-            epsilon=simulation_config.get("epsilon", 0.1),
-        )
+    tokenizer = HLETokenizer(token_config)
+    simulator = GameSimulator(
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        temperature=simulation_config.get("temperature", 1.0),
+    )
     
     games_played = 0
     
@@ -192,16 +173,7 @@ def game_worker(
             break
         
         try:
-            result = simulator.simulate_game(
-                config=game_config,
-                collect_all_perspectives=simulation_config.get("collect_all_perspectives", True),
-            )
-            # MCTSGameSimulator returns (GameResult, List[SearchTransition])
-            # GameSimulator returns just GameResult
-            if isinstance(result, tuple):
-                game_result, _search_transitions = result
-            else:
-                game_result = result
+            game_result = simulator.simulate_game(config=game_config)
             result_queue.put((worker_id, game_result))
             games_played += 1
             
@@ -323,6 +295,8 @@ class DistributedCoordinator:
                 num_players_range=game_config_ranges.get("players", (2, 5)),
                 num_colors_range=game_config_ranges.get("colors", (3, 5)),
                 num_ranks_range=game_config_ranges.get("ranks", (3, 5)),
+                max_information_tokens=self.model_config["token_config"].max_info_tokens,
+                max_life_tokens=self.model_config["token_config"].max_life_tokens,
             )
             game_queue.put(config)
         
@@ -375,12 +349,9 @@ class DistributedCoordinator:
         dataloader = create_dataloader(
             buffer=self.buffer,
             batch_size=batch_size,
+            token_config=self.model_config["token_config"],
             shuffle=True,
             num_workers=0,
-            max_num_players=self.model_config["max_num_players"],
-            max_num_colors=self.model_config["max_num_colors"],
-            max_num_ranks=self.model_config["max_num_ranks"],
-            max_hand_size=self.model_config["max_hand_size"],
         )
         
         all_metrics = []
@@ -417,28 +388,14 @@ class DistributedCoordinator:
                         logger.info(f"  Step {steps_done}/{num_steps}, Loss: {avg_loss:.4f}")
                         
                         if self.use_wandb:
-                            log_dict = {
+                            wandb.log({
                                 "train/step": self.state.total_train_steps,
-                                "train/loss": metrics["total_loss"],
-                                "train/color_loss": metrics.get("color_loss", 0),
-                                "train/rank_loss": metrics.get("rank_loss", 0),
-                                "train/action_loss": metrics.get("action_loss", 0),
-                                "train/color_accuracy": metrics.get("color_accuracy", 0),
-                                "train/rank_accuracy": metrics.get("rank_accuracy", 0),
+                                "train/loss": metrics.get("total_loss", 0),
                                 "train/action_accuracy": metrics.get("action_accuracy", 0),
+                                "train/mean_reward": metrics.get("mean_reward", 0),
+                                "train/mean_advantage": metrics.get("mean_advantage", 0),
                                 "train/learning_rate": metrics.get("learning_rate", 0),
-                            }
-                            
-                            # Add MCTS-specific metrics if available
-                            if "policy_loss" in metrics:
-                                log_dict.update({
-                                    "train/policy_loss": metrics.get("policy_loss", 0),
-                                    "train/value_loss": metrics.get("value_loss", 0),
-                                    "train/value_mae": metrics.get("value_mae", 0),
-                                    "train/mean_value_pred": metrics.get("mean_value_pred", 0),
-                                })
-                            
-                            wandb.log(log_dict) # type: ignore
+                            }) # type: ignore
                 
                 except Exception as e:
                     logger.error(f"Training step failed: {e}")
@@ -539,13 +496,13 @@ class DistributedCoordinator:
         self.state.iteration = iteration
         
         # Update exploration parameters
-        if self.training_config.get("epsilon_decay", 0) > 0:
-            old_epsilon = self.simulation_config.get("epsilon", 0.1)
-            new_epsilon = old_epsilon * (1 - self.training_config["epsilon_decay"])
-            new_epsilon = max(self.training_config.get("min_epsilon", 0.01), new_epsilon)
-            self.simulation_config["epsilon"] = new_epsilon
+        if self.training_config.get("temperature_decay", 0) > 0:
+            old_temp = self.simulation_config.get("temperature", 1.0)
+            new_temp = old_temp * (1 - self.training_config["temperature_decay"])
+            new_temp = max(self.training_config.get("min_temperature", 0.1), new_temp)
+            self.simulation_config["temperature"] = new_temp
             self.state.simulation_config = self.simulation_config
-            logger.info(f"Epsilon: {old_epsilon:.4f} -> {new_epsilon:.4f}")
+            logger.info(f"Temperature: {old_temp:.4f} -> {new_temp:.4f}")
         
         # Save training state
         self.state.save()
@@ -749,15 +706,26 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
         state.reset()
     
     # Model configuration
+    token_config = TokenizationConfig(
+        num_colors=args.max_colors,
+        num_ranks=args.max_ranks,
+        hand_size=args.max_hand_size,
+        max_num_players=args.max_players,
+        max_info_tokens=args.max_info_tokens,
+        max_life_tokens=args.max_life_tokens,
+    )
+
     model_config = {
         "max_num_colors": args.max_colors,
         "max_num_ranks": args.max_ranks,
         "max_hand_size": args.max_hand_size,
         "max_num_players": args.max_players,
+        "max_cards": args.max_colors * args.max_ranks,
         "num_heads": args.num_heads,
         "num_layers": args.num_layers,
         "d_model": args.d_model,
         "action_dim": 4,
+        "token_config": token_config,
     }
     
     # Training configuration
@@ -765,26 +733,18 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "max_grad_norm": args.max_grad_norm,
-        "epsilon_decay": args.epsilon_decay,
-        "min_epsilon": args.min_epsilon,
+        "temperature_decay": args.temperature_decay,
+        "min_temperature": args.min_temperature,
     }
     
     # Simulation configuration (restore from state if available)
     if state.simulation_config:
         simulation_config = state.simulation_config
+        if "temperature" not in simulation_config:
+            simulation_config["temperature"] = args.temperature
     else:
         simulation_config = {
             "temperature": args.temperature,
-            "epsilon": args.epsilon,
-            "collect_all_perspectives": True,
-            "training_mode": args.training_mode,
-            # MCTS-specific settings
-            "mcts_simulations": args.mcts_simulations,
-            "c_puct": args.c_puct,
-            "temperature_drop_move": args.temperature_drop_move,
-            "dirichlet_alpha": args.dirichlet_alpha,
-            "dirichlet_weight": args.dirichlet_weight,
-            "top_k_actions": args.top_k_actions,
         }
     
     # Game config ranges
@@ -795,8 +755,9 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
     }
     
     # Full config for wandb
+    model_config_log = {k: v for k, v in model_config.items() if k != "token_config"}
     full_config = {
-        **model_config,
+        **model_config_log,
         **training_config,
         **simulation_config,
         **{f"game_{k}": v for k, v in game_config_ranges.items()},
@@ -809,6 +770,8 @@ async def run_distributed_training(args: argparse.Namespace) -> None:
         "buffer_size": args.buffer_size,
         "gpu_host": args.gpu_host,
         "gpu_port": args.gpu_port,
+        "max_info_tokens": args.max_info_tokens,
+        "max_life_tokens": args.max_life_tokens,
     }
     
     # Initialize WandB
@@ -932,6 +895,8 @@ def main():
     parser.add_argument("--max-colors", type=int, default=5, help="Maximum colors")
     parser.add_argument("--max-ranks", type=int, default=5, help="Maximum ranks")
     parser.add_argument("--max-hand-size", type=int, default=5, help="Maximum hand size")
+    parser.add_argument("--max-info-tokens", type=int, default=8, help="Maximum information tokens")
+    parser.add_argument("--max-life-tokens", type=int, default=3, help="Maximum life tokens")
     parser.add_argument("--num-heads", type=int, default=4, help="Attention heads")
     parser.add_argument("--num-layers", type=int, default=4, help="Transformer layers")
     parser.add_argument("--d-model", type=int, default=128, help="Model dimension")
@@ -956,21 +921,8 @@ def main():
     
     # Exploration
     parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
-    parser.add_argument("--epsilon", type=float, default=0.1, help="Epsilon-greedy")
-    parser.add_argument("--epsilon-decay", type=float, default=0.01, help="Epsilon decay")
-    parser.add_argument("--min-epsilon", type=float, default=0.01, help="Minimum epsilon")
-    
-    # Training mode
-    parser.add_argument("--training-mode", type=str, choices=["supervised", "mcts"], default="supervised",
-                       help="Training mode: 'supervised' (cross-entropy) or 'mcts' (policy distillation)")
-    
-    # MCTS parameters (used when training_mode=mcts)
-    parser.add_argument("--mcts-simulations", type=int, default=100, help="MCTS simulations per move")
-    parser.add_argument("--c-puct", type=float, default=1.4, help="PUCT exploration constant")
-    parser.add_argument("--temperature-drop-move", type=int, default=30, help="Move after which temperature drops to 0")
-    parser.add_argument("--dirichlet-alpha", type=float, default=0.3, help="Dirichlet noise alpha")
-    parser.add_argument("--dirichlet-weight", type=float, default=0.25, help="Dirichlet noise weight")
-    parser.add_argument("--top-k-actions", type=int, default=5, help="Top actions to expand in MCTS")
+    parser.add_argument("--temperature-decay", type=float, default=0.01, help="Temperature decay")
+    parser.add_argument("--min-temperature", type=float, default=0.1, help="Minimum temperature")
     
     # Logging
     parser.add_argument("--log-interval", type=int, default=10, help="Log every N steps")

@@ -13,6 +13,8 @@ max_players = 5
 max_colors = 5
 max_ranks = 5
 max_hand_size = 5
+max_info_tokens = 8
+max_life_tokens = 3
 num_heads = 4
 num_layers = 4
 d_model = 128
@@ -26,18 +28,11 @@ batch_size = 256
 scheduler_t0 = 1000
 min_lr = 1e-6
 
-# Loss weights
-color_loss_weight = 1.0
-rank_loss_weight = 1.0
-action_loss_weight = 1.0
-
 [simulation]
 # Game simulation settings
 temperature = 1.0
-epsilon = 0.1
-epsilon_decay = 0.01
-min_epsilon = 0.01
-collect_all_perspectives = true
+temperature_decay = 0.01
+min_temperature = 0.1
 
 [game_ranges]
 # Game configuration ranges for variety

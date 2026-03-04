@@ -1,475 +1,95 @@
 """
-Tests for the ActionDecoder belief model.
+Tests for the token-based ActionDecoder pipeline.
 """
 
-import pytest
 import torch
-import numpy as np
+
 from rl_hanabi.model.action_decoder import ActionDecoder
-
-
-class TestActionDecoderInitialization:
-    """Test ActionDecoder initialization and architecture."""
-
-    def test_init_default_params(self):
-        """Test initialization with default parameters."""
-        model = ActionDecoder(
-            num_colors=5,
-            num_ranks=5,
-            hand_size=5,
-            num_players=2,
-        )
-        assert model is not None
-        assert hasattr(model, 'transformer')
-        assert hasattr(model, 'color_head')
-        assert hasattr(model, 'rank_head')
-
-    def test_init_custom_params(self):
-        """Test initialization with custom parameters."""
-        model = ActionDecoder(
-            num_colors=4,
-            num_ranks=6,
-            hand_size=8,
-            num_players=3,
-            num_heads=8,
-            num_layers=6,
-            d_model=256,
-            action_dim=4,
-        )
-        assert model is not None
-
-    def test_device_placement(self):
-        """Test that model can be moved to different devices."""
-        model = ActionDecoder(5, 5, 5, 2)
-        model_cpu = model.cpu()
-        assert next(model_cpu.parameters()).device.type == 'cpu'
-
-        if torch.cuda.is_available():
-            model_cuda = model.cuda()
-            assert next(model_cuda.parameters()).device.type == 'cuda'
-
-
-class TestActionDecoderForward:
-    """Test ActionDecoder forward pass."""
-
-    @pytest.fixture
-    def model(self):
-        """Create a default ActionDecoder model for tests."""
-        return ActionDecoder(
-            num_colors=5,
-            num_ranks=5,
-            hand_size=5,
-            num_players=2,
-        )
-
-    def test_forward_pass_basic(self, model):
-        """Test basic forward pass with valid inputs."""
-        batch_size = 2
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 2
-
-        slot_beliefs = torch.randn(batch_size, num_players, hand_size, num_colors + num_ranks)
-        affected_mask = torch.randint(0, 2, (batch_size, num_players, hand_size)).float()
-        move_target_player = torch.tensor([0, 1], dtype=torch.long)
-        acting_player = torch.tensor([0, 1], dtype=torch.long)
-        action = torch.randn(batch_size, 4)
-        fireworks = torch.randn(batch_size, num_colors)
-        discard_pile = torch.randn(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        assert color_logits.shape == (batch_size, hand_size, num_colors)
-        assert rank_logits.shape == (batch_size, hand_size, num_ranks)
-
-    def test_output_shapes(self, model):
-        """Test that output shapes are correct for various batch sizes."""
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 2
-
-        for batch_size in [1, 4, 8]:
-            slot_beliefs = torch.randn(batch_size, num_players, hand_size, num_colors + num_ranks)
-            affected_mask = torch.randint(0, 2, (batch_size, num_players, hand_size)).float()
-            move_target_player = torch.randint(0, num_players, (batch_size,), dtype=torch.long)
-            acting_player = torch.randint(0, num_players, (batch_size,), dtype=torch.long)
-            action = torch.randn(batch_size, 4)
-            fireworks = torch.randn(batch_size, num_colors)
-            discard_pile = torch.randn(batch_size, num_colors * num_ranks)
-
-            color_logits, rank_logits = model(
-                slot_beliefs=slot_beliefs,
-                affected_mask=affected_mask,
-                move_target_player=move_target_player,
-                acting_player=acting_player,
-                action=action,
-                fireworks=fireworks,
-                discard_pile=discard_pile,
-            )
-
-            assert color_logits.shape == (batch_size, hand_size, num_colors)
-            assert rank_logits.shape == (batch_size, hand_size, num_ranks)
-
-    def test_forward_with_zero_inputs(self, model):
-        """Test forward pass with zero inputs."""
-        batch_size = 2
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 2
-
-        slot_beliefs = torch.zeros(batch_size, num_players, hand_size, num_colors + num_ranks)
-        affected_mask = torch.zeros(batch_size, num_players, hand_size)
-        move_target_player = torch.zeros(batch_size, dtype=torch.long)
-        acting_player = torch.zeros(batch_size, dtype=torch.long)
-        action = torch.zeros(batch_size, 4)
-        fireworks = torch.zeros(batch_size, num_colors)
-        discard_pile = torch.zeros(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        assert not torch.isnan(color_logits).any()
-        assert not torch.isnan(rank_logits).any()
-
-    def test_forward_with_ones_inputs(self, model):
-        """Test forward pass with ones inputs."""
-        batch_size = 2
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 2
-
-        slot_beliefs = torch.ones(batch_size, num_players, hand_size, num_colors + num_ranks)
-        affected_mask = torch.ones(batch_size, num_players, hand_size)
-        move_target_player = torch.ones(batch_size, dtype=torch.long)
-        acting_player = torch.ones(batch_size, dtype=torch.long)
-        action = torch.ones(batch_size, 4)
-        fireworks = torch.ones(batch_size, num_colors)
-        discard_pile = torch.ones(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        assert not torch.isnan(color_logits).any()
-        assert not torch.isnan(rank_logits).any()
-
-
-class TestActionDecoderGradients:
-    """Test gradient flow through ActionDecoder."""
-
-    def test_gradients_flow(self):
-        """Test that gradients flow through the model."""
-        model = ActionDecoder(5, 5, 5, 2)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-        batch_size = 2
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 2
-
-        slot_beliefs = torch.randn(batch_size, num_players, hand_size, num_colors + num_ranks,
-                                   requires_grad=False)
-        affected_mask = torch.randint(0, 2, (batch_size, num_players, hand_size)).float()
-        move_target_player = torch.tensor([0, 1], dtype=torch.long)
-        acting_player = torch.tensor([0, 1], dtype=torch.long)
-        action = torch.randn(batch_size, 4)
-        fireworks = torch.randn(batch_size, num_colors)
-        discard_pile = torch.randn(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        # Create dummy targets and loss
-        color_targets = torch.randint(0, num_colors, (batch_size, hand_size))
-        rank_targets = torch.randint(0, num_ranks, (batch_size, hand_size))
-
-        color_loss = torch.nn.functional.cross_entropy(
-            color_logits.view(-1, num_colors),
-            color_targets.view(-1)
-        )
-        rank_loss = torch.nn.functional.cross_entropy(
-            rank_logits.view(-1, num_ranks),
-            rank_targets.view(-1)
-        )
-
-        loss = color_loss + rank_loss
-        loss.backward()
-
-        # Check that gradients exist and are non-zero for some parameters
-        has_gradients = False
-        for param in model.parameters():
-            if param.grad is not None and param.grad.abs().sum() > 0:
-                has_gradients = True
-                break
-
-        assert has_gradients, "Gradients should flow through the model"
-
-    def test_optimizer_step(self):
-        """Test that optimizer can perform a step."""
-        model = ActionDecoder(5, 5, 5, 2)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-        batch_size = 2
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 2
-
-        initial_params = [p.clone() for p in model.parameters()]
-
-        slot_beliefs = torch.randn(batch_size, num_players, hand_size, num_colors + num_ranks)
-        affected_mask = torch.randint(0, 2, (batch_size, num_players, hand_size)).float()
-        move_target_player = torch.tensor([0, 1], dtype=torch.long)
-        acting_player = torch.tensor([0, 1], dtype=torch.long)
-        action = torch.randn(batch_size, 4)
-        fireworks = torch.randn(batch_size, num_colors)
-        discard_pile = torch.randn(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        color_targets = torch.randint(0, num_colors, (batch_size, hand_size))
-        rank_targets = torch.randint(0, num_ranks, (batch_size, hand_size))
-
-        color_loss = torch.nn.functional.cross_entropy(
-            color_logits.view(-1, num_colors),
-            color_targets.view(-1)
-        )
-        rank_loss = torch.nn.functional.cross_entropy(
-            rank_logits.view(-1, num_ranks),
-            rank_targets.view(-1)
-        )
-
-        loss = color_loss + rank_loss
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        # Check that parameters have changed
-        params_changed = False
-        for initial_param, current_param in zip(initial_params, model.parameters()):
-            if not torch.allclose(initial_param, current_param):
-                params_changed = True
-                break
-
-        assert params_changed, "Parameters should be updated by optimizer"
-
-
-class TestActionDecoderDifferentArchitectures:
-    """Test ActionDecoder with different architectural configurations."""
-
-    def test_single_head_attention(self):
-        """Test with single attention head."""
-        model = ActionDecoder(
-            num_colors=5,
-            num_ranks=5,
-            hand_size=5,
-            num_players=2,
-            num_heads=1,
-            num_layers=1,
-            d_model=64,
-        )
-
-        batch_size = 1
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 2
-
-        slot_beliefs = torch.randn(batch_size, num_players, hand_size, num_colors + num_ranks)
-        affected_mask = torch.zeros(batch_size, num_players, hand_size)
-        move_target_player = torch.tensor([0], dtype=torch.long)
-        acting_player = torch.tensor([0], dtype=torch.long)
-        action = torch.randn(batch_size, 4)
-        fireworks = torch.randn(batch_size, num_colors)
-        discard_pile = torch.randn(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        assert color_logits.shape == (batch_size, hand_size, num_colors)
-        assert rank_logits.shape == (batch_size, hand_size, num_ranks)
-
-    def test_deep_model(self):
-        """Test with deep architecture."""
-        model = ActionDecoder(
-            num_colors=5,
-            num_ranks=5,
-            hand_size=5,
-            num_players=2,
-            num_heads=8,
-            num_layers=12,
-            d_model=256,
-        )
-
-        batch_size = 1
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 2
-
-        slot_beliefs = torch.randn(batch_size, num_players, hand_size, num_colors + num_ranks)
-        affected_mask = torch.zeros(batch_size, num_players, hand_size)
-        move_target_player = torch.tensor([0], dtype=torch.long)
-        acting_player = torch.tensor([0], dtype=torch.long)
-        action = torch.randn(batch_size, 4)
-        fireworks = torch.randn(batch_size, num_colors)
-        discard_pile = torch.randn(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        assert color_logits.shape == (batch_size, hand_size, num_colors)
-        assert rank_logits.shape == (batch_size, hand_size, num_ranks)
-
-
-class TestActionDecoderEdgeCases:
-    """Test ActionDecoder with edge cases."""
-
-    def test_single_player(self):
-        """Test with single player (edge case)."""
-        model = ActionDecoder(5, 5, 5, 1)
-
-        batch_size = 2
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 1
-
-        slot_beliefs = torch.randn(batch_size, num_players, hand_size, num_colors + num_ranks)
-        affected_mask = torch.zeros(batch_size, num_players, hand_size)
-        move_target_player = torch.zeros(batch_size, dtype=torch.long)
-        acting_player = torch.zeros(batch_size, dtype=torch.long)
-        action = torch.randn(batch_size, 4)
-        fireworks = torch.randn(batch_size, num_colors)
-        discard_pile = torch.randn(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        assert color_logits.shape == (batch_size, hand_size, num_colors)
-
-    def test_large_hand_size(self):
-        """Test with large hand size."""
-        model = ActionDecoder(5, 5, 20, 2)
-
-        batch_size = 1
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 20
-        num_players = 2
-
-        slot_beliefs = torch.randn(batch_size, num_players, hand_size, num_colors + num_ranks)
-        affected_mask = torch.zeros(batch_size, num_players, hand_size)
-        move_target_player = torch.tensor([0], dtype=torch.long)
-        acting_player = torch.tensor([0], dtype=torch.long)
-        action = torch.randn(batch_size, 4)
-        fireworks = torch.randn(batch_size, num_colors)
-        discard_pile = torch.randn(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        assert color_logits.shape == (batch_size, hand_size, num_colors)
-
-    def test_many_players(self):
-        """Test with many players."""
-        model = ActionDecoder(5, 5, 5, 5)
-
-        batch_size = 2
-        num_colors = 5
-        num_ranks = 5
-        hand_size = 5
-        num_players = 5
-
-        slot_beliefs = torch.randn(batch_size, num_players, hand_size, num_colors + num_ranks)
-        affected_mask = torch.zeros(batch_size, num_players, hand_size)
-        move_target_player = torch.randint(0, num_players, (batch_size,), dtype=torch.long)
-        acting_player = torch.randint(0, num_players, (batch_size,), dtype=torch.long)
-        action = torch.randn(batch_size, 4)
-        fireworks = torch.randn(batch_size, num_colors)
-        discard_pile = torch.randn(batch_size, num_colors * num_ranks)
-
-        color_logits, rank_logits = model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
-        )
-
-        assert color_logits.shape == (batch_size, hand_size, num_colors)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+from rl_hanabi.model.tokenizer import TokenizationConfig
+from rl_hanabi.training.token_utils import build_action_logits_from_tokens
+
+
+def _make_token_config() -> TokenizationConfig:
+    return TokenizationConfig(
+        num_colors=2,
+        num_ranks=2,
+        hand_size=2,
+        max_num_players=2,
+        max_info_tokens=8,
+        max_life_tokens=3,
+    )
+
+
+def test_action_decoder_forward_shapes():
+    token_config = _make_token_config()
+    model = ActionDecoder(
+        num_colors=token_config.num_colors,
+        num_ranks=token_config.num_ranks,
+        max_cards=token_config.num_card_tokens,
+        hand_size=token_config.hand_size,
+        num_players=token_config.max_num_players,
+        num_heads=2,
+        num_layers=2,
+        d_model=32,
+        action_dim=4,
+        token_config=token_config,
+    )
+
+    batch_size = 3
+    tokens = torch.zeros(batch_size, token_config.context_size, dtype=torch.long)
+    tokens[:, 0] = 3
+    tokens[:, 1] = 8
+    tokens[:, 2] = 0
+    tokens[:, 3:] = torch.randint(
+        low=0,
+        high=token_config.total_card_tokens,
+        size=(batch_size, token_config.context_size - 3),
+    )
+
+    logits = model(tokens)
+    assert logits.shape == (batch_size, token_config.max_num_players * token_config.hand_size, 4)
+
+
+def test_action_logits_mapping():
+    token_config = _make_token_config()
+    hand_start = 3 + token_config.num_colors
+    tokens = torch.zeros(1, token_config.context_size, dtype=torch.long)
+    tokens[0, 0] = 3
+    tokens[0, 1] = 8
+    tokens[0, 2] = 0
+
+    tokens[0, hand_start + 0] = token_config.masked_card_token
+    tokens[0, hand_start + 1] = token_config.masked_card_token
+
+    tokens[0, hand_start + 2] = 2 + 1 * token_config.num_ranks + 0
+    tokens[0, hand_start + 3] = 2 + 0 * token_config.num_ranks + 1
+
+    card_action_logits = torch.zeros(
+        1,
+        token_config.max_num_players * token_config.hand_size,
+        4,
+    )
+    card_action_logits[0, 0, 0] = 1.5
+    card_action_logits[0, 0, 1] = 2.0
+    card_action_logits[0, 2, 2] = 0.7
+    card_action_logits[0, 2, 3] = 1.1
+    card_action_logits[0, 3, 2] = 1.3
+    card_action_logits[0, 3, 3] = -0.2
+
+    action_logits = build_action_logits_from_tokens(
+        card_action_logits=card_action_logits,
+        tokens=tokens,
+        current_player=torch.tensor([0]),
+        num_players=torch.tensor([2]),
+        num_colors=torch.tensor([2]),
+        num_ranks=torch.tensor([2]),
+        hand_size=torch.tensor([2]),
+        token_config=token_config,
+    ).squeeze(0)
+
+    assert action_logits[0].item() == 1.5
+    assert action_logits[2].item() == 2.0
+    assert action_logits[4].item() == 1.3
+    assert action_logits[5].item() == 0.7
+    assert action_logits[6].item() == 1.1
+    assert action_logits[7].item() == -0.2
