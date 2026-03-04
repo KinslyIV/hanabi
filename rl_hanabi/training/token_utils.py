@@ -193,6 +193,9 @@ def build_action_logits_from_tokens(
             action_logits[b, slot_idx] = card_action_logits[b, card_slot, 0]
             action_logits[b, max_H + slot_idx] = card_action_logits[b, card_slot, 1]
 
+        color_candidates: dict[int, List[torch.Tensor]] = {}
+        rank_candidates: dict[int, List[torch.Tensor]] = {}
+
         for offset in range(1, sizes.num_players):
             target_player = (current + offset) % sizes.num_players
             for slot_idx in range(sizes.hand_size):
@@ -206,16 +209,19 @@ def build_action_logits_from_tokens(
 
                 if color < sizes.num_colors:
                     color_idx = 2 * max_H + (offset - 1) * max_C + color
-                    action_logits[b, color_idx] = torch.maximum(
-                        action_logits[b, color_idx],
-                        card_action_logits[b, card_slot, 2],
+                    color_candidates.setdefault(color_idx, []).append(
+                        card_action_logits[b, card_slot, 2]
                     )
 
                 if rank < sizes.num_ranks:
                     rank_idx = 2 * max_H + (max_N - 1) * max_C + (offset - 1) * max_R + rank
-                    action_logits[b, rank_idx] = torch.maximum(
-                        action_logits[b, rank_idx],
-                        card_action_logits[b, card_slot, 3],
+                    rank_candidates.setdefault(rank_idx, []).append(
+                        card_action_logits[b, card_slot, 3]
                     )
+
+        for idx, values in color_candidates.items():
+            action_logits[b, idx] = torch.stack(values).amax()
+        for idx, values in rank_candidates.items():
+            action_logits[b, idx] = torch.stack(values).amax()
 
     return action_logits

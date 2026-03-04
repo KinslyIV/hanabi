@@ -2,6 +2,7 @@
 Tests for the token-based ActionDecoder pipeline.
 """
 
+import pytest
 import torch
 
 from rl_hanabi.model.action_decoder import ActionDecoder
@@ -87,9 +88,9 @@ def test_action_logits_mapping():
         token_config=token_config,
     ).squeeze(0)
 
-    assert action_logits[0].item() == 1.5
-    assert action_logits[2].item() == 2.0
-    assert action_logits[4].item() == 1.3
-    assert action_logits[5].item() == 0.7
-    assert action_logits[6].item() == 1.1
-    assert action_logits[7].item() == -0.2
+    assert action_logits[0].item() == pytest.approx(1.5)
+    assert action_logits[2].item() == pytest.approx(2.0)
+    assert action_logits[4].item() == pytest.approx(1.3)
+    assert action_logits[5].item() == pytest.approx(0.7)
+    assert action_logits[6].item() == pytest.approx(1.1)
+    assert action_logits[7].item() == pytest.approx(-0.2)

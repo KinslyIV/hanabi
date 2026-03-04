@@ -153,7 +153,7 @@ def collect_results(
             buffer.add_game_result(result)
             
             # Track config distribution
-            config_key = f"p{game_result.game_config['num_players']}_c{game_result.game_config['num_colors']}_r{game_result.game_config['num_ranks']}"
+            config_key = f"p{result.game_config['num_players']}_c{result.game_config['num_colors']}_r{result.game_config['num_ranks']}"
             config_counts[config_key] += 1
             
             collected += 1
