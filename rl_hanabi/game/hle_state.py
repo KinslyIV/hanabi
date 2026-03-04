@@ -107,6 +107,10 @@ class HLEGameState:
     def get_hands(self):
         return self.state.player_hands()
 
+    def get_player_hand(self, player_index: int) -> List[pyhanabi.HanabiCard]:
+        """Return the specified player's hand by index."""
+        return list(self.state.player_hands()[player_index])
+
     @property
     def current_player_index(self) -> int:
         # With player_shift=0, HLE player index = website player index
