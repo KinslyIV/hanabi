@@ -1,15 +1,14 @@
 """
-Training loop for Hanabi self-play with WandB integration.
+Training loop for Hanabi self-play with tokenized inputs.
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
@@ -18,249 +17,103 @@ from torch.utils.data import DataLoader
 import wandb
 
 from rl_hanabi.model.action_decoder import ActionDecoder
-from rl_hanabi.training.data_collection import ReplayBuffer, create_dataloader
+from rl_hanabi.model.tokenizer import TokenizationConfig
+from rl_hanabi.training.data_collection import ReplayBuffer
+from rl_hanabi.training.token_utils import build_action_logits_from_tokens
 
 
 class HanabiTrainer:
-    """
-    Trainer for the ActionDecoder model using self-play data.
-    Integrates with WandB for experiment tracking.
-    
-    Supports two training modes:
-    1. Supervised: Train action head against chosen actions (imitation learning)
-    2. MCTS: Train action head against MCTS policy targets (AlphaZero-style)
-    
-    Both modes train the value head against game outcome rewards.
-    """
-    
+    """Trainer for the ActionDecoder using final-score policy gradients."""
+
     def __init__(
         self,
         model: ActionDecoder,
         buffer: ReplayBuffer,
         device: torch.device,
         config: Dict[str, Any],
+        token_config: TokenizationConfig,
         checkpoint_dir: Optional[Path] = None,
     ):
         self.model = model.to(device)
         self.buffer = buffer
         self.device = device
         self.config = config
+        self.token_config = token_config
         self.checkpoint_dir = checkpoint_dir
-        
+
         if checkpoint_dir:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Optimizer
+
         self.optimizer = AdamW(
             model.parameters(),
             lr=config.get("learning_rate", 1e-4),
             weight_decay=config.get("weight_decay", 0.01),
             betas=(0.9, 0.999),
         )
-        
-        # Learning rate scheduler
+
         self.scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
             T_0=config.get("scheduler_t0", 1000),
             T_mult=config.get("scheduler_t_mult", 2),
             eta_min=config.get("min_lr", 1e-6),
         )
-        
-        # Loss weights
-        self.color_loss_weight = config.get("color_loss_weight", 1.0)
-        self.rank_loss_weight = config.get("rank_loss_weight", 1.0)
-        self.action_loss_weight = config.get("action_loss_weight", 1.0)
-        self.value_loss_weight = config.get("value_loss_weight", 1.0)
-        self.policy_loss_weight = config.get("policy_loss_weight", 1.0)
-        
-        # Training mode: 'supervised' or 'mcts'
-        self.training_mode = config.get("training_mode", "supervised")
-        
-        # Training state
+
         self.global_step = 0
         self.epoch = 0
-        self.best_loss = float('inf')
-        
-        # Metrics tracking
+        self.best_loss = float("inf")
+
         self.train_metrics: Dict[str, List[float]] = {
             "total_loss": [],
-            "color_loss": [],
-            "rank_loss": [],
-            "action_loss": [],
-            "policy_loss": [],
-            "value_loss": [],
-            "color_accuracy": [],
-            "rank_accuracy": [],
             "action_accuracy": [],
+            "mean_reward": [],
+            "mean_advantage": [],
         }
-    
+
     def compute_loss(
         self,
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute losses for a batch of transitions.
-        
-        Computes:
-        - Color/Rank prediction losses (belief state learning)
-        - Action loss: Either supervised (cross-entropy with chosen action) or
-                       MCTS policy distillation (cross-entropy with MCTS policy)
-        - Value loss: MSE between predicted value and game outcome reward
-        """
-        
-        # Move batch to device
-        slot_beliefs = batch["slot_beliefs"].to(self.device)
-        affected_mask = batch["affected_mask"].to(self.device)
-        move_target_player = batch["move_target_player"].to(self.device)
-        acting_player = batch["acting_player"].to(self.device)
-        action = batch["action"].to(self.device)
-        fireworks = batch["fireworks"].to(self.device)
-        discard_pile = batch["discard_pile"].to(self.device)
-        true_colors = batch["true_colors"].to(self.device)
-        true_ranks = batch["true_ranks"].to(self.device)
-        chosen_action_idx = batch["chosen_action_idx"].to(self.device)
+        tokens = batch["tokens"].to(self.device)
         legal_moves_mask = batch["legal_moves_mask"].to(self.device)
+        chosen_action_idx = batch["chosen_action_idx"].to(self.device)
+        reward = batch["reward"].to(self.device)
+        current_player = batch["current_player"].to(self.device)
+        num_players = batch["num_players"].to(self.device)
+        num_colors = batch["num_colors"].to(self.device)
+        num_ranks = batch["num_ranks"].to(self.device)
         hand_size = batch["hand_size"].to(self.device)
-        reward = batch["reward"].to(self.device)  # [B] normalized final score
-        
-        # Get MCTS policy if available (for MCTS training mode)
-        mcts_policy = batch.get("mcts_policy")
-        if mcts_policy is not None:
-            mcts_policy = mcts_policy.to(self.device)
-        
-        # Forward pass
-        color_logits, rank_logits, action_logits, value = self.model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
+
+        card_action_logits = self.model(tokens)
+        action_logits = build_action_logits_from_tokens(
+            card_action_logits=card_action_logits,
+            tokens=tokens,
+            current_player=current_player,
+            num_players=num_players,
+            num_colors=num_colors,
+            num_ranks=num_ranks,
+            hand_size=hand_size,
+            token_config=self.token_config,
         )
-        
-        B, H, C = color_logits.shape
-        _, _, R = rank_logits.shape
-        
-        # Create valid slot mask (where true colors/ranks are not -1)
-        valid_mask = (true_colors >= 0) & (true_ranks >= 0)  # [B, H]
-        
-        # Color prediction loss
-        color_logits_flat = color_logits.view(-1, C)  # [B*H, C]
-        true_colors_flat = true_colors.view(-1)  # [B*H]
-        valid_mask_flat = valid_mask.view(-1)  # [B*H]
-        
-        # Mask invalid targets
-        true_colors_flat_masked = true_colors_flat.clone()
-        true_colors_flat_masked[~valid_mask_flat] = 0  # Placeholder for invalid
-        
-        color_loss = F.cross_entropy(
-            color_logits_flat,
-            true_colors_flat_masked,
-            reduction='none'
-        )
-        color_loss = (color_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
-        
-        # Rank prediction loss
-        rank_logits_flat = rank_logits.view(-1, R)  # [B*H, R]
-        true_ranks_flat = true_ranks.view(-1)  # [B*H]
-        
-        true_ranks_flat_masked = true_ranks_flat.clone()
-        true_ranks_flat_masked[~valid_mask_flat] = 0
-        
-        rank_loss = F.cross_entropy(
-            rank_logits_flat,
-            true_ranks_flat_masked,
-            reduction='none'
-        )
-        rank_loss = (rank_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
-        
-        # ========== Action/Policy Loss ==========
-        # Mask illegal actions with large negative values
-        action_logits_masked = action_logits.clone()
-        action_logits_masked[~legal_moves_mask.bool()] = -1e9
-        
-        # Ensure chosen_action_idx is within bounds
-        max_action_idx = action_logits.size(-1) - 1
-        chosen_action_idx_clamped = chosen_action_idx.clamp(0, max_action_idx)
-        
-        # Compute action loss based on training mode
-        if self.training_mode == "mcts" and mcts_policy is not None:
-            # MCTS policy distillation: cross-entropy with MCTS policy targets
-            # policy_loss = -sum(mcts_policy * log_softmax(action_logits))
-            log_probs = F.log_softmax(action_logits_masked, dim=-1)
-            
-            # Ensure MCTS policy is valid (sum to 1, non-negative)
-            mcts_policy_valid = mcts_policy.clamp(min=1e-8)
-            mcts_policy_valid = mcts_policy_valid / (mcts_policy_valid.sum(dim=-1, keepdim=True) + 1e-8)
-            
-            # Cross-entropy loss: -sum(target * log(pred))
-            policy_loss = -(mcts_policy_valid * log_probs).sum(dim=-1).mean()
-            
-            # Supervised action loss (for metrics, using chosen action)
-            action_loss = F.cross_entropy(
-                action_logits_masked,
-                chosen_action_idx_clamped,
-                reduction='mean'
-            )
-        else:
-            # Supervised mode: cross-entropy with chosen action
-            action_loss = F.cross_entropy(
-                action_logits_masked,
-                chosen_action_idx_clamped,
-                reduction='mean'
-            )
-            policy_loss = action_loss  # Same as action loss in supervised mode
-        
-        # ========== Value Loss ==========
-        # MSE between predicted value and reward (normalized final score)
-        value_loss = F.mse_loss(value, reward)
-        
-        # ========== Total Loss ==========
-        total_loss = (
-            self.color_loss_weight * color_loss +
-            self.rank_loss_weight * rank_loss +
-            self.value_loss_weight * value_loss
-        )
-        
-        # Add policy loss based on mode
-        if self.training_mode == "mcts" and mcts_policy is not None:
-            total_loss = total_loss + self.policy_loss_weight * policy_loss
-        else:
-            total_loss = total_loss + self.action_loss_weight * action_loss
-        
-        # Compute accuracies
+
+        masked_logits = action_logits.masked_fill(~legal_moves_mask, -1e9)
+        log_probs = F.log_softmax(masked_logits, dim=-1)
+        chosen_log_prob = log_probs.gather(1, chosen_action_idx.unsqueeze(1)).squeeze(1)
+
+        baseline = reward.mean()
+        advantage = reward - baseline
+        total_loss = -(advantage.detach() * chosen_log_prob).mean()
+
         with torch.no_grad():
-            color_preds = color_logits_flat.argmax(dim=-1)
-            color_correct = (color_preds == true_colors_flat) & valid_mask_flat
-            color_acc = color_correct.sum().float() / (valid_mask_flat.sum() + 1e-8)
-            
-            rank_preds = rank_logits_flat.argmax(dim=-1)
-            rank_correct = (rank_preds == true_ranks_flat) & valid_mask_flat
-            rank_acc = rank_correct.sum().float() / (valid_mask_flat.sum() + 1e-8)
-            
-            # For action accuracy, use masked logits to get legal predictions
-            action_preds = action_logits_masked.argmax(dim=-1)
-            action_correct = (action_preds == chosen_action_idx_clamped)
-            action_acc = action_correct.float().mean()
-            
-            # Value prediction metrics
-            value_mae = (value - reward).abs().mean()
-        
+            action_preds = masked_logits.argmax(dim=-1)
+            action_acc = (action_preds == chosen_action_idx).float().mean()
+
         metrics = {
             "total_loss": total_loss.item(),
-            "color_loss": color_loss.item(),
-            "rank_loss": rank_loss.item(),
-            "action_loss": action_loss.item(),
-            "policy_loss": policy_loss.item(),
-            "value_loss": value_loss.item(),
-            "color_accuracy": color_acc.item(),
-            "rank_accuracy": rank_acc.item(),
             "action_accuracy": action_acc.item(),
-            "value_mae": value_mae.item(),
             "mean_reward": reward.mean().item(),
-            "mean_value_pred": value.mean().item(),
+            "mean_advantage": advantage.mean().item(),
         }
-        
+
         return total_loss, metrics
     
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -315,12 +168,9 @@ class HanabiTrainer:
                     wandb.log({
                         "train/step": self.global_step,
                         "train/loss": metrics["total_loss"],
-                        "train/color_loss": metrics["color_loss"],
-                        "train/rank_loss": metrics["rank_loss"],
-                        "train/action_loss": metrics["action_loss"],
-                        "train/color_accuracy": metrics["color_accuracy"],
-                        "train/rank_accuracy": metrics["rank_accuracy"],
                         "train/action_accuracy": metrics["action_accuracy"],
+                        "train/mean_reward": metrics["mean_reward"],
+                        "train/mean_advantage": metrics["mean_advantage"],
                         "train/learning_rate": metrics["learning_rate"],
                     })
         

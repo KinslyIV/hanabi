@@ -7,24 +7,23 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import pickle
 import signal
 import struct
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
+from rl_hanabi.model.tokenizer import TokenizationConfig
 from rl_hanabi.training.distributed.protocol import TrainingRequest, TrainingResponse
+from rl_hanabi.training.token_utils import build_action_logits_from_tokens
 
 # Configure logging
 logging.basicConfig(
@@ -55,16 +54,19 @@ class GPUTrainer:
         # Import here to avoid circular imports
         from rl_hanabi.model.action_decoder import ActionDecoder
         
-        # Create model
+        token_config = model_config["token_config"]
+
         self.model = ActionDecoder(
             num_colors=model_config["max_num_colors"],
             num_ranks=model_config["max_num_ranks"],
+            max_cards=model_config["max_cards"],
             hand_size=model_config["max_hand_size"],
             num_players=model_config["max_num_players"],
             num_heads=model_config.get("num_heads", 4),
             num_layers=model_config.get("num_layers", 4),
             d_model=model_config.get("d_model", 128),
             action_dim=model_config.get("action_dim", 4),
+            token_config=token_config,
         )
         self.model.to(device)
         
@@ -84,17 +86,9 @@ class GPUTrainer:
             eta_min=training_config.get("min_lr", 1e-6),
         )
         
-        # Loss weights
-        self.color_loss_weight = training_config.get("color_loss_weight", 0.5)
-        self.rank_loss_weight = training_config.get("rank_loss_weight", 0.5)
-        self.action_loss_weight = training_config.get("action_loss_weight", 1.0)
-        self.value_loss_weight = training_config.get("value_loss_weight", 1.0)
-        self.policy_loss_weight = training_config.get("policy_loss_weight", 1.0)
-        self.failed_play_penalty = training_config.get("failed_play_penalty", 2.0)
         self.max_grad_norm = training_config.get("max_grad_norm", 1.0)
-        
-        # Training mode: 'supervised' or 'mcts'
-        self.training_mode = training_config.get("training_mode", "supervised")
+
+        self.token_config = token_config
         
         # Training state
         self.global_step = 0
@@ -108,179 +102,47 @@ class GPUTrainer:
         self,
         batch: Dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, Dict[str, float]]:
-        """Compute losses for a batch of transitions.
-        
-        Supports two training modes:
-        - 'supervised': Cross-entropy with chosen actions (original)
-        - 'mcts': Policy distillation from MCTS + value prediction
-        """
-        
-        # Move batch to device
-        slot_beliefs = batch["slot_beliefs"].to(self.device)
-        affected_mask = batch["affected_mask"].to(self.device)
-        move_target_player = batch["move_target_player"].to(self.device)
-        acting_player = batch["acting_player"].to(self.device)
-        action = batch["action"].to(self.device)
-        fireworks = batch["fireworks"].to(self.device)
-        discard_pile = batch["discard_pile"].to(self.device)
-        true_colors = batch["true_colors"].to(self.device)
-        true_ranks = batch["true_ranks"].to(self.device)
-        chosen_action_idx = batch["chosen_action_idx"].to(self.device)
+        tokens = batch["tokens"].to(self.device)
         legal_moves_mask = batch["legal_moves_mask"].to(self.device)
-        reward = batch["reward"].to(self.device)  # [B] normalized final score
-        step_reward = batch["step_reward"].to(self.device)  # [B] immediate score change
-        failed_play = batch["failed_play"].to(self.device)  # [B] bool
-        
-        # Get MCTS policy if available (for MCTS training mode)
-        mcts_policy = batch.get("mcts_policy")
-        if mcts_policy is not None:
-            mcts_policy = mcts_policy.to(self.device)
-        
-        # Forward pass
-        color_logits, rank_logits, action_logits, value = self.model(
-            slot_beliefs=slot_beliefs,
-            affected_mask=affected_mask,
-            move_target_player=move_target_player,
-            acting_player=acting_player,
-            action=action,
-            fireworks=fireworks,
-            discard_pile=discard_pile,
+        chosen_action_idx = batch["chosen_action_idx"].to(self.device)
+        reward = batch["reward"].to(self.device)
+        current_player = batch["current_player"].to(self.device)
+        num_players = batch["num_players"].to(self.device)
+        num_colors = batch["num_colors"].to(self.device)
+        num_ranks = batch["num_ranks"].to(self.device)
+        hand_size = batch["hand_size"].to(self.device)
+
+        card_action_logits = self.model(tokens)
+        action_logits = build_action_logits_from_tokens(
+            card_action_logits=card_action_logits,
+            tokens=tokens,
+            current_player=current_player,
+            num_players=num_players,
+            num_colors=num_colors,
+            num_ranks=num_ranks,
+            hand_size=hand_size,
+            token_config=self.token_config,
         )
-        
-        B, H, C = color_logits.shape
-        _, _, R = rank_logits.shape
-        
-        # Create valid slot mask
-        valid_mask = (true_colors >= 0) & (true_ranks >= 0)
-        
-        # Color prediction loss
-        color_logits_flat = color_logits.view(-1, C)
-        true_colors_flat = true_colors.view(-1)
-        valid_mask_flat = valid_mask.view(-1)
-        
-        true_colors_flat_masked = true_colors_flat.clone()
-        true_colors_flat_masked[~valid_mask_flat] = 0
-        
-        color_loss = F.cross_entropy(
-            color_logits_flat,
-            true_colors_flat_masked,
-            reduction='none'
-        )
-        color_loss = (color_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
-        
-        # Rank prediction loss
-        rank_logits_flat = rank_logits.view(-1, R)
-        true_ranks_flat = true_ranks.view(-1)
-        
-        true_ranks_flat_masked = true_ranks_flat.clone()
-        true_ranks_flat_masked[~valid_mask_flat] = 0
-        
-        rank_loss = F.cross_entropy(
-            rank_logits_flat,
-            true_ranks_flat_masked,
-            reduction='none'
-        )
-        rank_loss = (rank_loss * valid_mask_flat.float()).sum() / (valid_mask_flat.sum() + 1e-8)
-        
-        # ========== Action/Policy Loss ==========
-        # Mask illegal actions
-        action_logits_masked = action_logits.clone()
-        action_logits_masked[~legal_moves_mask.bool()] = -1e9
-        
-        max_action_idx = action_logits.size(-1) - 1
-        chosen_action_idx_clamped = chosen_action_idx.clamp(0, max_action_idx)
-        
-        # Compute action loss based on training mode
-        if self.training_mode == "mcts" and mcts_policy is not None:
-            # MCTS policy distillation: cross-entropy with MCTS policy targets
-            log_probs = F.log_softmax(action_logits_masked, dim=-1)
-            
-            # Ensure MCTS policy is valid (sum to 1, non-negative)
-            mcts_policy_valid = mcts_policy.clamp(min=1e-8)
-            mcts_policy_valid = mcts_policy_valid / (mcts_policy_valid.sum(dim=-1, keepdim=True) + 1e-8)
-            
-            # Cross-entropy loss: -sum(target * log(pred))
-            policy_loss = -(mcts_policy_valid * log_probs).sum(dim=-1).mean()
-            
-            # Supervised action loss (for metrics)
-            action_loss = F.cross_entropy(
-                action_logits_masked,
-                chosen_action_idx_clamped,
-                reduction='mean'
-            )
-        else:
-            # Supervised mode with Actor-Critic style Policy Gradient
-            log_probs = F.log_softmax(action_logits_masked, dim=-1)
-            chosen_log_prob = log_probs.gather(1, chosen_action_idx_clamped.unsqueeze(1)).squeeze(1)
-            
-            # Compute advantage
-            step_advantage = step_reward * 1.5
-            game_baseline = reward.mean()
-            game_advantage = (reward - game_baseline) * 1.0
-            bomb_penalty = -self.failed_play_penalty * failed_play.float()
-            advantage = step_advantage + game_advantage + bomb_penalty
-            
-            action_loss = -(chosen_log_prob * advantage.detach()).mean()
-            policy_loss = action_loss  # Same in supervised mode
-        
-        # ========== Value Loss ==========
-        # MSE between predicted value and reward (normalized final score)
-        value_loss = F.mse_loss(value, reward)
-        
-        # ========== Total Loss ==========
-        total_loss = (
-            self.color_loss_weight * color_loss +
-            self.rank_loss_weight * rank_loss +
-            self.value_loss_weight * value_loss
-        )
-        
-        # Add policy loss based on mode
-        if self.training_mode == "mcts" and mcts_policy is not None:
-            total_loss = total_loss + self.policy_loss_weight * policy_loss
-        else:
-            total_loss = total_loss + self.action_loss_weight * action_loss
-        
-        # Compute accuracies
+
+        masked_logits = action_logits.masked_fill(~legal_moves_mask, -1e9)
+        log_probs = F.log_softmax(masked_logits, dim=-1)
+        chosen_log_prob = log_probs.gather(1, chosen_action_idx.unsqueeze(1)).squeeze(1)
+
+        baseline = reward.mean()
+        advantage = reward - baseline
+        total_loss = -(advantage.detach() * chosen_log_prob).mean()
+
         with torch.no_grad():
-            color_preds = color_logits_flat.argmax(dim=-1)
-            color_correct = (color_preds == true_colors_flat) & valid_mask_flat
-            color_acc = color_correct.sum().float() / (valid_mask_flat.sum() + 1e-8)
-            
-            rank_preds = rank_logits_flat.argmax(dim=-1)
-            rank_correct = (rank_preds == true_ranks_flat) & valid_mask_flat
-            rank_acc = rank_correct.sum().float() / (valid_mask_flat.sum() + 1e-8)
-            
-            # For action accuracy, use masked logits to get legal predictions
-            # but compute accuracy to see if model predicts the chosen legal action
-            action_preds = action_logits_masked.argmax(dim=-1)
-            action_correct = (action_preds == chosen_action_idx_clamped)
-            action_acc = action_correct.float().mean()
-            
-            # Additional metrics
-            avg_reward = reward.mean()
-            avg_step_reward = step_reward.mean()
-            failed_play_rate = failed_play.float().mean()
-            
-            # Value prediction metrics
-            value_mae = (value - reward).abs().mean()
-        
+            action_preds = masked_logits.argmax(dim=-1)
+            action_acc = (action_preds == chosen_action_idx).float().mean()
+
         metrics = {
             "total_loss": total_loss.item(),
-            "color_loss": color_loss.item(),
-            "rank_loss": rank_loss.item(),
-            "action_loss": action_loss.item(),
-            "policy_loss": policy_loss.item(),
-            "value_loss": value_loss.item(),
-            "color_accuracy": color_acc.item(),
-            "rank_accuracy": rank_acc.item(),
             "action_accuracy": action_acc.item(),
-            "avg_reward": avg_reward.item(),
-            "avg_step_reward": avg_step_reward.item(),
-            "failed_play_rate": failed_play_rate.item(),
-            "value_mae": value_mae.item(),
-            "mean_value_pred": value.mean().item(),
+            "mean_reward": reward.mean().item(),
+            "mean_advantage": advantage.mean().item(),
         }
-        
+
         return total_loss, metrics
     
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -426,12 +288,14 @@ class GPUTrainer:
         self.model = ActionDecoder(
             num_colors=self.model_config["max_num_colors"],
             num_ranks=self.model_config["max_num_ranks"],
+            max_cards=self.model_config["max_cards"],
             hand_size=self.model_config["max_hand_size"],
             num_players=self.model_config["max_num_players"],
             num_heads=self.model_config.get("num_heads", 4),
             num_layers=self.model_config.get("num_layers", 4),
             d_model=self.model_config.get("d_model", 128),
             action_dim=self.model_config.get("action_dim", 4),
+            token_config=self.model_config["token_config"],
         )
         self.model.to(self.device)
         
@@ -888,6 +752,8 @@ def main():
     parser.add_argument("--max-colors", type=int, default=5, help="Maximum number of colors")
     parser.add_argument("--max-ranks", type=int, default=5, help="Maximum number of ranks")
     parser.add_argument("--max-hand-size", type=int, default=5, help="Maximum hand size")
+    parser.add_argument("--max-info-tokens", type=int, default=8, help="Maximum information tokens")
+    parser.add_argument("--max-life-tokens", type=int, default=3, help="Maximum life tokens")
     parser.add_argument("--num-heads", type=int, default=4, help="Number of attention heads")
     parser.add_argument("--num-layers", type=int, default=4, help="Number of transformer layers")
     parser.add_argument("--d-model", type=int, default=128, help="Model dimension")
@@ -898,19 +764,6 @@ def main():
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Max gradient norm")
     parser.add_argument("--scheduler-t0", type=int, default=500, help="Scheduler T_0")
     parser.add_argument("--min-lr", type=float, default=1e-6, help="Minimum learning rate")
-    
-    # Loss weights
-    parser.add_argument("--color-loss-weight", type=float, default=0.4, help="Color loss weight")
-    parser.add_argument("--rank-loss-weight", type=float, default=0.4, help="Rank loss weight")
-    parser.add_argument("--action-loss-weight", type=float, default=1.0, help="Action loss weight")
-    parser.add_argument("--value-loss-weight", type=float, default=1.0, help="Value prediction loss weight")
-    parser.add_argument("--policy-loss-weight", type=float, default=1.0, help="MCTS policy distillation loss weight")
-    parser.add_argument("--failed-play-penalty", type=float, default=2.0, 
-                       help="Penalty multiplier for failed play moves (bombs)")
-    
-    # Training mode
-    parser.add_argument("--training-mode", type=str, choices=["supervised", "mcts"], default="supervised",
-                       help="Training mode: 'supervised' (cross-entropy) or 'mcts' (policy distillation)")
     
     # Checkpoint settings
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoint directory")
@@ -937,15 +790,26 @@ def main():
         logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     
     # Configuration
+    token_config = TokenizationConfig(
+        num_colors=args.max_colors,
+        num_ranks=args.max_ranks,
+        hand_size=args.max_hand_size,
+        max_num_players=args.max_players,
+        max_info_tokens=args.max_info_tokens,
+        max_life_tokens=args.max_life_tokens,
+    )
+
     model_config = {
         "max_num_colors": args.max_colors,
         "max_num_ranks": args.max_ranks,
         "max_hand_size": args.max_hand_size,
         "max_num_players": args.max_players,
+        "max_cards": args.max_colors * args.max_ranks,
         "num_heads": args.num_heads,
         "num_layers": args.num_layers,
         "d_model": args.d_model,
         "action_dim": 4,
+        "token_config": token_config,
     }
     
     training_config = {
@@ -955,13 +819,6 @@ def main():
         "scheduler_t0": args.scheduler_t0,
         "scheduler_t_mult": 2,
         "min_lr": args.min_lr,
-        "color_loss_weight": args.color_loss_weight,
-        "rank_loss_weight": args.rank_loss_weight,
-        "action_loss_weight": args.action_loss_weight,
-        "value_loss_weight": args.value_loss_weight,
-        "policy_loss_weight": args.policy_loss_weight,
-        "failed_play_penalty": args.failed_play_penalty,
-        "training_mode": args.training_mode,
     }
     
     # Create trainer
