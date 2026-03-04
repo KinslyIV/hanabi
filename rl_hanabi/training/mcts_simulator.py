@@ -86,10 +86,10 @@ class MCTSGameSimulator:
         self.min_visits_for_search_transition = min_visits_for_search_transition
         
         # Model dimensions for padding
-        self.max_num_colors = model.max_num_colors
-        self.max_num_ranks = model.max_num_ranks
-        self.max_hand_size = model.max_hand_size
-        self.max_num_players = model.max_num_players
+        self.max_num_colors = model.num_colors
+        self.max_num_ranks = model.num_ranks
+        self.max_hand_size = model.hand_size
+        self.max_num_players = model.num_players
     
     def _create_mcts(self, temperature: float) -> BeliefMCTS:
         """Create a new MCTS instance with current settings."""

@@ -14,10 +14,10 @@ class TestActionDecoderInitialization:
     def test_init_default_params(self):
         """Test initialization with default parameters."""
         model = ActionDecoder(
-            max_num_colors=5,
-            max_num_ranks=5,
-            max_hand_size=5,
-            max_num_players=2,
+            num_colors=5,
+            num_ranks=5,
+            hand_size=5,
+            num_players=2,
         )
         assert model is not None
         assert hasattr(model, 'transformer')
@@ -27,10 +27,10 @@ class TestActionDecoderInitialization:
     def test_init_custom_params(self):
         """Test initialization with custom parameters."""
         model = ActionDecoder(
-            max_num_colors=4,
-            max_num_ranks=6,
-            max_hand_size=8,
-            max_num_players=3,
+            num_colors=4,
+            num_ranks=6,
+            hand_size=8,
+            num_players=3,
             num_heads=8,
             num_layers=6,
             d_model=256,
@@ -56,10 +56,10 @@ class TestActionDecoderForward:
     def model(self):
         """Create a default ActionDecoder model for tests."""
         return ActionDecoder(
-            max_num_colors=5,
-            max_num_ranks=5,
-            max_hand_size=5,
-            max_num_players=2,
+            num_colors=5,
+            num_ranks=5,
+            hand_size=5,
+            num_players=2,
         )
 
     def test_forward_pass_basic(self, model):
@@ -301,10 +301,10 @@ class TestActionDecoderDifferentArchitectures:
     def test_single_head_attention(self):
         """Test with single attention head."""
         model = ActionDecoder(
-            max_num_colors=5,
-            max_num_ranks=5,
-            max_hand_size=5,
-            max_num_players=2,
+            num_colors=5,
+            num_ranks=5,
+            hand_size=5,
+            num_players=2,
             num_heads=1,
             num_layers=1,
             d_model=64,
@@ -340,10 +340,10 @@ class TestActionDecoderDifferentArchitectures:
     def test_deep_model(self):
         """Test with deep architecture."""
         model = ActionDecoder(
-            max_num_colors=5,
-            max_num_ranks=5,
-            max_hand_size=5,
-            max_num_players=2,
+            num_colors=5,
+            num_ranks=5,
+            hand_size=5,
+            num_players=2,
             num_heads=8,
             num_layers=12,
             d_model=256,

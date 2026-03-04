@@ -76,10 +76,10 @@ def game_worker(
     # Create model for this worker (always use CPU for workers to avoid CUDA issues)
     device = torch.device("cpu")
     model = ActionDecoder(
-        max_num_colors=model_config["max_num_colors"],
-        max_num_ranks=model_config["max_num_ranks"],
-        max_hand_size=model_config["max_hand_size"],
-        max_num_players=model_config["max_num_players"],
+        num_colors=model_config["max_num_colors"],
+        num_ranks=model_config["max_num_ranks"],
+        hand_size=model_config["max_hand_size"],
+        num_players=model_config["max_num_players"],
         num_heads=model_config.get("num_heads", 4),
         num_layers=model_config.get("num_layers", 4),
         d_model=model_config.get("d_model", 128),
@@ -233,10 +233,10 @@ def run_training(args: argparse.Namespace):
     
     # Create model
     model = ActionDecoder(
-        max_num_colors=model_config["max_num_colors"],
-        max_num_ranks=model_config["max_num_ranks"],
-        max_hand_size=model_config["max_hand_size"],
-        max_num_players=model_config["max_num_players"],
+        num_colors=model_config["max_num_colors"],
+        num_ranks=model_config["max_num_ranks"],
+        hand_size=model_config["max_hand_size"],
+        num_players=model_config["max_num_players"],
         num_heads=model_config["num_heads"],
         num_layers=model_config["num_layers"],
         d_model=model_config["d_model"],

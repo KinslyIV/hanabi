@@ -132,10 +132,10 @@ class BeliefMCTSBot(BaseBot):
             model_config = checkpoint.get("model_config", {})
             
             self.model = ActionDecoder(
-                max_num_colors=model_config.get("max_num_colors", 5),
-                max_num_ranks=model_config.get("max_num_ranks", 5),
-                max_hand_size=model_config.get("max_hand_size", 5),
-                max_num_players=model_config.get("max_num_players", 5),
+                num_colors=model_config.get("max_num_colors", 5),
+                num_ranks=model_config.get("max_num_ranks", 5),
+                hand_size=model_config.get("max_hand_size", 5),
+                num_players=model_config.get("max_num_players", 5),
                 num_heads=model_config.get("num_heads", 4),
                 num_layers=model_config.get("num_layers", 4),
                 d_model=model_config.get("d_model", 128),

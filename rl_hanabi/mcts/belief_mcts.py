@@ -198,10 +198,10 @@ class BeliefMCTS:
         self.top_k_actions = top_k_actions
         
         # Model dimensions for padding
-        self.max_num_colors = model.max_num_colors
-        self.max_num_ranks = model.max_num_ranks
-        self.max_hand_size = model.max_hand_size
-        self.max_num_players = model.max_num_players
+        self.max_num_colors = model.num_colors
+        self.max_num_ranks = model.num_ranks
+        self.max_hand_size = model.hand_size
+        self.max_num_players = model.num_players
         
         # Search transition collection settings
         self.collect_search_transitions = collect_search_transitions

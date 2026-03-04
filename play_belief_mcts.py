@@ -111,10 +111,10 @@ def load_model(checkpoint_path: Path, device: torch.device) -> ActionDecoder:
     d_model = model_config.get("d_model", 128)
     
     model = ActionDecoder(
-        max_num_colors=max_num_colors,
-        max_num_ranks=max_num_ranks,
-        max_hand_size=max_hand_size,
-        max_num_players=max_num_players,
+        num_colors=max_num_colors,
+        num_ranks=max_num_ranks,
+        hand_size=max_hand_size,
+        num_players=max_num_players,
         num_heads=num_heads,
         num_layers=num_layers,
         d_model=d_model,

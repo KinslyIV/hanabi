@@ -57,10 +57,10 @@ class GPUTrainer:
         
         # Create model
         self.model = ActionDecoder(
-            max_num_colors=model_config["max_num_colors"],
-            max_num_ranks=model_config["max_num_ranks"],
-            max_hand_size=model_config["max_hand_size"],
-            max_num_players=model_config["max_num_players"],
+            num_colors=model_config["max_num_colors"],
+            num_ranks=model_config["max_num_ranks"],
+            hand_size=model_config["max_hand_size"],
+            num_players=model_config["max_num_players"],
             num_heads=model_config.get("num_heads", 4),
             num_layers=model_config.get("num_layers", 4),
             d_model=model_config.get("d_model", 128),
@@ -424,10 +424,10 @@ class GPUTrainer:
         from rl_hanabi.model.belief_model import ActionDecoder
         
         self.model = ActionDecoder(
-            max_num_colors=self.model_config["max_num_colors"],
-            max_num_ranks=self.model_config["max_num_ranks"],
-            max_hand_size=self.model_config["max_hand_size"],
-            max_num_players=self.model_config["max_num_players"],
+            num_colors=self.model_config["max_num_colors"],
+            num_ranks=self.model_config["max_num_ranks"],
+            hand_size=self.model_config["max_hand_size"],
+            num_players=self.model_config["max_num_players"],
             num_heads=self.model_config.get("num_heads", 4),
             num_layers=self.model_config.get("num_layers", 4),
             d_model=self.model_config.get("d_model", 128),

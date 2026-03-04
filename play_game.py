@@ -111,10 +111,10 @@ def load_model(checkpoint_path: Path, device: torch.device) -> ActionDecoder:
     d_model = model_config.get("d_model", 128)
     
     model = ActionDecoder(
-        max_num_colors=max_num_colors,
-        max_num_ranks=max_num_ranks,
-        max_hand_size=max_hand_size,
-        max_num_players=max_num_players,
+        num_colors=max_num_colors,
+        num_ranks=max_num_ranks,
+        hand_size=max_hand_size,
+        num_players=max_num_players,
         num_heads=num_heads,
         num_layers=num_layers,
         d_model=d_model,
@@ -226,7 +226,7 @@ def select_action(
     padded_beliefs, padded_fireworks, padded_discard, padded_mask = pad_observation(
         all_hands, fireworks, discard_pile_one_hot, affected_mask,
         num_players, num_colors, num_ranks, hand_size,
-        model.max_num_colors, model.max_num_ranks, model.max_hand_size, model.max_num_players,
+        model.num_colors, model.num_ranks, model.hand_size, model.num_players,
     )
     
     player_idx, target_idx = belief_state.get_last_player_and_target_index()

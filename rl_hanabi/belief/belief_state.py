@@ -564,10 +564,10 @@ class BeliefState:
         target_player = (move_player_index + target_player_off) % self.num_players
         
         # Get model's expected max dimensions
-        max_num_colors: int = model.max_num_colors
-        max_num_ranks: int = model.max_num_ranks
-        max_hand_size: int = model.max_hand_size
-        max_num_players: int = model.max_num_players
+        max_num_colors: int = model.num_colors
+        max_num_ranks: int = model.num_ranks
+        max_hand_size: int = model.hand_size
+        max_num_players: int = model.num_players
         
         # Run model for each player to update each of their beliefs of their own hand
         for p in range(self.num_players):
