@@ -115,6 +115,10 @@ class HLETokenizer:
         Returns:
             action_logits: (batch, action_space_size) - logits for each action
         """
+        # NOTE: This function must stay differentiable from the returned `action_logits`
+        # back to `card_action_logits`. Avoid in-place writes into a tensor that does not
+        # require grad, as that can sever autograd connectivity.
+
         device = card_action_logits.device
         batch_size = card_action_logits.size(0)
         H = self.config.hand_size
@@ -124,36 +128,26 @@ class HLETokenizer:
         hand_start = 3 + C
         hand_end = hand_start + N * H
 
-        action_logits = torch.full(
-            (batch_size, self.config.action_space_size - 1),
-            -1e9,
-            device=device,
-        )
-        
         # (batch, num_players, hand_size)
         hand_tokens = tokens[:, hand_start:hand_end].view(batch_size, N, H)
         # (batch, num_players, hand_size, 4)
         card_logits_view = card_action_logits.view(batch_size, N, H, 4)
 
         # Vectorized play/discard: gather current player's hand logits
-        # current_player: (batch,) -> (batch, 1, 1, 1) for gathering
         cp_idx = current_player.view(batch_size, 1, 1, 1).expand(batch_size, 1, H, 4)
-        # (batch, 1, H, 4) -> (batch, H, 4)
-        # Gather will use current_player to select the correct player's hand logits for each batch element
-        # Meaning for each dimension != 1 in the cp_idx matrix we take the value at that position of the current_player index, 
-        # so we end up with the hand logits for the current player in each batch element 
-        current_hand_logits = card_logits_view.gather(1, cp_idx).squeeze(1)
-        
-        # Discard actions: indices 0..H-1
-        action_logits[:, :H] = current_hand_logits[:, :, 0]
-        # Play actions: indices H..2H-1
-        action_logits[:, H:2*H] = current_hand_logits[:, :, 1]
+        current_hand_logits = card_logits_view.gather(1, cp_idx).squeeze(1)  # (batch, H, 4)
 
-        # Hint actions require aggregation per (offset, color/rank)
-        # Still need per-batch loop due to current_player varying
+        discard_logits = current_hand_logits[:, :, 0]  # (batch, H)
+        play_logits = current_hand_logits[:, :, 1]  # (batch, H)
+
+        # Hint logits: (batch, (N-1)*(C+R)) corresponding to indices [2H .. end)
+        hint_dim = (N - 1) * (C + R)
+        hint_logits_per_batch: List[torch.Tensor] = []
+
+        # Still need per-batch loop due to `current_player` varying across the batch.
         for b in range(batch_size):
             current = int(current_player[b].item())
-            
+
             color_candidates: dict[int, List[torch.Tensor]] = {}
             rank_candidates: dict[int, List[torch.Tensor]] = {}
 
@@ -166,26 +160,42 @@ class HLETokenizer:
                     color = (token - 2) // R
                     rank = (token - 2) % R
 
-                    # Color hint action index: 2H + (offset-1)*C + color
-                    # For every player n for every slot in their hand we look at the token, 
-                    # if it's a card token we compute the color and rank and then compute 
-                    # the corresponding hint action index for that color and offset and 
-                    # add the card's hint_color logit to the list of candidates for that hint action index
-                    color_idx = 2 * H + (offset - 1) * C + color
-                    color_candidates.setdefault(color_idx, []).append(
+                    # Convert absolute action indices into hint-space indices (0..hint_dim-1)
+                    # Color hint: 2H + (offset-1)*C + color
+                    hint_color_idx = (offset - 1) * C + color
+                    color_candidates.setdefault(hint_color_idx, []).append(
                         card_logits_view[b, target_player, slot_idx, 2]
                     )
 
-                    rank_idx = 2 * H + (N - 1) * C + (offset - 1) * R + rank
-                    rank_candidates.setdefault(rank_idx, []).append(
+                    # Rank hint: 2H + (N-1)*C + (offset-1)*R + rank
+                    hint_rank_idx = (N - 1) * C + (offset - 1) * R + rank
+                    rank_candidates.setdefault(hint_rank_idx, []).append(
                         card_logits_view[b, target_player, slot_idx, 3]
                     )
 
-            for idx, values in color_candidates.items():
-                action_logits[b, idx] = torch.stack(values).amax()
-            for idx, values in rank_candidates.items():
-                action_logits[b, idx] = torch.stack(values).amax()
+            # Start from -inf and place per-hint maxima out-of-place (keeps autograd)
+            hint_logits_b = torch.full((hint_dim,), -1e9, device=device)
 
+            if color_candidates or rank_candidates:
+                hint_indices: List[int] = []
+                hint_values: List[torch.Tensor] = []
+
+                for idx, values in color_candidates.items():
+                    hint_indices.append(idx)
+                    hint_values.append(torch.stack(values).amax())
+                for idx, values in rank_candidates.items():
+                    hint_indices.append(idx)
+                    hint_values.append(torch.stack(values).amax())
+
+                index_tensor = torch.tensor(hint_indices, device=device, dtype=torch.long)
+                value_tensor = torch.stack(hint_values)
+                hint_logits_b = hint_logits_b.index_copy(0, index_tensor, value_tensor)
+
+            hint_logits_per_batch.append(hint_logits_b)
+
+        hint_logits = torch.stack(hint_logits_per_batch, dim=0)  # (batch, hint_dim)
+
+        action_logits = torch.cat([discard_logits, play_logits, hint_logits], dim=1)
         return action_logits
 
     def _validate_state_config(self, state: "HLEGameState") -> None:
@@ -276,9 +286,10 @@ class HLETokenizer:
         return [self.card_to_token(card) for card in state.state.discard_pile()]
 
     def tokenize_action_index(self, action_index: int) -> int:
-        if action_index < 0 or action_index >= self.config.action_space_size:
+        # Action index -1 will give token 0 which is the no action token passed to the model for the first move
+        if action_index < -1 or action_index >= self.config.action_space_size:
             raise ValueError(f"Action index {action_index} out of bounds")
-        # action tokens start at index 1 index 0 is for no action
+        # action tokens start at token 1 token 0 is for no action
         return action_index + 1
 
 
