@@ -95,7 +95,7 @@ class HLEGameState:
         return cls(game=game, state=state, game_config=game_config)
     
     def __repr__(self) -> str:
-        return self.state.__repr__()
+        return  f"\nScore: {self.score()}\n" + self.state.__repr__()
 
     # ----- basic API for MCTS ------------------------------------------
 
