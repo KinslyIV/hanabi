@@ -78,7 +78,7 @@ class HanabiTrainer:
         tokens = batch["tokens"]
         legal_moves_mask = batch["legal_moves_mask"]
         chosen_action_idx = batch["chosen_action_idx"]
-        reward = batch["reward"].squeeze(-1)
+        reward = batch["reward"]
         current_player = batch["current_player"]
 
         card_action_logits, value = self.model(tokens)
@@ -89,6 +89,7 @@ class HanabiTrainer:
         chosen_log_prob = log_probs.gather(1, chosen_action_idx.unsqueeze(1)).squeeze(1)
 
         value_1d = value.squeeze(-1)
+        reward = reward.reshape(value_1d.shape)
         advantage = reward - value_1d.detach()
         actor_loss = -(advantage * chosen_log_prob).mean()
         critic_loss = F.mse_loss(value_1d, reward)

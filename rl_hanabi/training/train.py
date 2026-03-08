@@ -161,7 +161,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         buffer=buffer,
         token_config=token_config,
         batch_size=batch_size,
-        shuffle_games=False,
+        shuffle_games=True,
         device=device,
     )
     dataloader = DataLoader(
@@ -197,6 +197,8 @@ def run_training(config: Dict[str, Dict[str, Any]]):
             result = simulator.simulate_game(config=game_config)
             buffer.add_game_result(result)
             collected += 1
+            if _ % 10 == 0:
+                print(f"Collected {_} games...")
         model.train()
 
         simulator.clear_player_models()
