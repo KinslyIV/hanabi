@@ -19,6 +19,7 @@ from hanabi_learning_environment import pyhanabi
 
 from rl_hanabi.model.action_decoder import ActionDecoder
 from rl_hanabi.game.hle_state import HLEGameState
+from rl_hanabi.training.token_utils import GameConfig
 from rl_hanabi.belief.belief_state import BeliefState
 from rl_hanabi.mcts.belief_mcts import BeliefMCTS
 
@@ -110,16 +111,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> ActionDecoder:
     num_layers = model_config.get("num_layers", 4)
     d_model = model_config.get("d_model", 128)
     
-    model = ActionDecoder(
-        num_colors=max_num_colors,
-        num_ranks=max_num_ranks,
-        hand_size=max_hand_size,
-        num_players=max_num_players,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        d_model=d_model,
-        action_dim=4,
-    )
+    model = ActionDecoder()
     
     # Try to load state dict, but handle missing value head gracefully
     state_dict = checkpoint["model_state_dict"]
@@ -319,7 +311,19 @@ def play_game_with_belief_mcts(
     }
     
     # Initialize game
-    state = HLEGameState.from_table_options(options, num_players)
+    game_config = GameConfig(
+        num_players=num_players,
+        num_colors=options.get("numSuits", 5),
+        num_ranks=options.get("numRanks", 5),
+        hand_size=options.get("cardsPerHand", 5),
+        max_information_tokens=options.get("clueTokens", 8),
+        max_life_tokens=options.get("strikeTokens", 3),
+        seed=options.get("seed", -1),
+    )
+    state = HLEGameState.from_table_options(
+        game_config,
+        starting_player=options.get("startingPlayer", 0),
+    )
     
     # Create belief states for all players
     belief_states = [
