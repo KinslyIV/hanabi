@@ -71,8 +71,6 @@ class GameSimulator:
     def clear_player_models(self) -> None:
         self._player_models = []
         self._player_count = 0
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
 
     @torch.no_grad()
     def simulate_game(

@@ -30,14 +30,6 @@ from rl_hanabi.training.trainer import (
     log_game_metrics,
     init_wandb,
 )
-
-
-def move_optimizer_state(optimizer: torch.optim.Optimizer, device: torch.device) -> None:
-    for state in optimizer.state.values():
-        for key, value in state.items():
-            if torch.is_tensor(value):
-                state[key] = value.to(device)
-
 def run_training(config: Dict[str, Dict[str, Any]]):
     """Main training loop."""
     
@@ -186,11 +178,6 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         
         start_time = time.time()
 
-        if device.type == "cuda":
-            model.to("cpu")
-            move_optimizer_state(trainer.optimizer, torch.device("cpu"))
-            torch.cuda.empty_cache()
-
         model.eval()
         collected = 0
         for _ in range(selfplay_cfg["games_per_iteration"]):
@@ -202,10 +189,6 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         model.train()
 
         simulator.clear_player_models()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-            model.to(device)
-            move_optimizer_state(trainer.optimizer, device)
 
         collection_time = time.time() - start_time
         print(f"Collected {collected} games in {collection_time:.2f}s")
