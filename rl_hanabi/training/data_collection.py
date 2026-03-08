@@ -100,6 +100,8 @@ class ReplayBuffer:
                 "avg_score": np.mean(scores).item() if scores else 0,
                 "max_score": max(scores) if scores else 0,
                 "min_score": min(scores) if scores else 0,
+                "max_turns": max(r["num_turns"] for r in self.game_results) if self.game_results else 0,
+                "min_turns": min(r["num_turns"] for r in self.game_results) if self.game_results else 0,
                 "avg_normalized_score": np.mean(normalized_scores).item() if normalized_scores else 0,
                 "avg_turns": np.mean([r["num_turns"] for r in self.game_results]).item(),
             }
@@ -154,11 +156,13 @@ class GameSequenceDataset(IterableDataset):
         batch_size: int,
         *,
         shuffle_games: bool = False,
+        device: Optional[torch.device] = None,
     ):
         self.buffer = buffer
         self.token_config = token_config
         self.batch_size = batch_size
         self.shuffle_games = shuffle_games
+        self.device = device
 
     def _pad_tokens(self, tokens: List[int]) -> List[int]:
         context_size = self.token_config.context_size
@@ -198,16 +202,17 @@ class GameSequenceDataset(IterableDataset):
             num_ranks_list.append(t.game_config.get("num_ranks", 5))
             hand_size_list.append(t.game_config.get("hand_size", 5))
 
-        tokens = torch.tensor(tokens_list, dtype=torch.long)
-        legal_moves_mask = torch.tensor(legal_moves_mask_list, dtype=torch.bool)
-        chosen_action_idx = torch.tensor(chosen_action_idx_list, dtype=torch.long)
-        reward = torch.tensor(reward_list, dtype=torch.float32)
-        done = torch.tensor(done_list, dtype=torch.bool)
-        current_player = torch.tensor(current_player_list, dtype=torch.long)
-        num_players = torch.tensor(num_players_list, dtype=torch.long)
-        num_colors = torch.tensor(num_colors_list, dtype=torch.long)
-        num_ranks = torch.tensor(num_ranks_list, dtype=torch.long)
-        hand_size = torch.tensor(hand_size_list, dtype=torch.long)
+        device = self.device
+        tokens = torch.tensor(tokens_list, dtype=torch.long, device=device)
+        legal_moves_mask = torch.tensor(legal_moves_mask_list, dtype=torch.bool, device=device)
+        chosen_action_idx = torch.tensor(chosen_action_idx_list, dtype=torch.long, device=device)
+        reward = torch.tensor(reward_list, dtype=torch.float32, device=device)
+        done = torch.tensor(done_list, dtype=torch.bool, device=device)
+        current_player = torch.tensor(current_player_list, dtype=torch.long, device=device)
+        num_players = torch.tensor(num_players_list, dtype=torch.long, device=device)
+        num_colors = torch.tensor(num_colors_list, dtype=torch.long, device=device)
+        num_ranks = torch.tensor(num_ranks_list, dtype=torch.long, device=device)
+        hand_size = torch.tensor(hand_size_list, dtype=torch.long, device=device)
 
         return {
             "tokens": tokens,
@@ -220,7 +225,7 @@ class GameSequenceDataset(IterableDataset):
             "num_colors": num_colors,
             "num_ranks": num_ranks,
             "hand_size": hand_size,
-            "reset_mask": torch.tensor(reset_mask, dtype=torch.bool),
+            "reset_mask": torch.tensor(reset_mask, dtype=torch.bool, device=device),
         }
 
     def __iter__(self) -> Iterator:

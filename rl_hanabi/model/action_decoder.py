@@ -160,14 +160,13 @@ class ActionDecoder(nn.Module):
         num_heads: Optional[int] = None,
         num_layers: Optional[int] = None,
         d_model: Optional[int] = None,
-        action_dim: Optional[int] = None,
         token_config: TokenizationConfig,
     ):
 
         super().__init__()
         
         if config is None:
-            if num_heads is None or num_layers is None or d_model is None or action_dim is None or token_config is None:
+            if num_heads is None or num_layers is None or d_model is None or token_config is None:
                 raise ValueError("Provide either config or all max_* parameters")
             config = ActionDecoderConfig(
                 num_colors=token_config.num_colors,
@@ -189,7 +188,7 @@ class ActionDecoder(nn.Module):
 
         # We prepend a learned state token to the embedded sequence, so all
         # positions after it are shifted by +1 compared to the raw token IDs.
-        self.hand_start = 1 + 3 + self.num_colors
+        self.hand_start = 1 + 4 + self.num_colors
         self.hand_len = self.num_players * self.hand_size
 
         self.pad_token = token_config.pad_token
@@ -199,6 +198,7 @@ class ActionDecoder(nn.Module):
         self.context_size = token_config.context_size
 
         self.card_emb = nn.Embedding(self.total_card_tokens, config.d_model, padding_idx=self.pad_token)
+        self.player_emb = nn.Embedding(self.num_players, config.d_model)
         self.action_emb = nn.Embedding(self.action_space_size, config.d_model, padding_idx=self.pad_token)
         self.life_proj = nn.Linear(1, config.d_model)
         self.info_proj = nn.Linear(1, config.d_model)
@@ -222,8 +222,8 @@ class ActionDecoder(nn.Module):
         if x.dtype != torch.long:
             x = x.long()
 
-        if x.size(1) < 3:
-            raise ValueError("Expected at least 3 tokens: life, info, action")
+        if x.size(1) < 4:
+            raise ValueError("Expected at least 4 tokens: current_player, life, info, action")
         if x.size(1) > self.context_size:
             raise ValueError("Sequence length exceeds context_size")
         if x.size(1) < self.context_size:
@@ -234,18 +234,20 @@ class ActionDecoder(nn.Module):
 
         batch_size = x.size(0)
 
-        life_tokens = x[:, 0].float().unsqueeze(-1)
-        info_tokens = x[:, 1].float().unsqueeze(-1)
-        action_tokens = x[:, 2]
-        card_tokens = x[:, 3:]
+        current_player_tokens = x[:, 0]
+        life_tokens = x[:, 1].float().unsqueeze(-1)
+        info_tokens = x[:, 2].float().unsqueeze(-1)
+        action_tokens = x[:, 3]
+        card_tokens = x[:, 4:]
 
+        current_player_emb = self.player_emb(current_player_tokens).unsqueeze(1)
         life_emb = self.life_proj(life_tokens).unsqueeze(1)
         info_emb = self.info_proj(info_tokens).unsqueeze(1)
         action_emb = self.action_emb(action_tokens).unsqueeze(1)
         card_emb = self.card_emb(card_tokens)
 
         state_emb = self.state_token.expand(batch_size, -1, -1)
-        x = torch.cat([state_emb, life_emb, info_emb, action_emb, card_emb], dim=1)
+        x = torch.cat([state_emb, current_player_emb, life_emb, info_emb, action_emb, card_emb], dim=1)
 
         key_padding = token_ids == self.pad_token
         key_padding = torch.cat(

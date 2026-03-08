@@ -9,16 +9,14 @@ import argparse
 import json
 import random
 import time
-from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Any
 
 import numpy as np
 import torch
 import wandb
 from torch.utils.data import DataLoader
 
-from rl_hanabi.game import GameConfig
 from rl_hanabi.model.action_decoder import ActionDecoder, ActionDecoderConfig
 from rl_hanabi.model.tokenizer import HLETokenizer, TokenizationConfig
 from rl_hanabi.training.utils import build_game_config, load_config
@@ -32,6 +30,13 @@ from rl_hanabi.training.trainer import (
     log_game_metrics,
     init_wandb,
 )
+
+
+def move_optimizer_state(optimizer: torch.optim.Optimizer, device: torch.device) -> None:
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
 
 def run_training(config: Dict[str, Dict[str, Any]]):
     """Main training loop."""
@@ -143,6 +148,28 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         tokenizer=tokenizer,
         checkpoint_dir=checkpoint_dir,
     )
+
+    simulator = GameSimulator(
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        temperature=simulation_config.get("temperature", 1.0),
+    )
+
+    batch_size = training_cfg["batch_size"]
+    dataset = GameSequenceDataset(
+        buffer=buffer,
+        token_config=token_config,
+        batch_size=batch_size,
+        shuffle_games=False,
+        device=device,
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_size=None,
+        num_workers=0,
+        pin_memory=False,
+    )
     
     print("Using single-process mode for game simulation")
 
@@ -159,12 +186,11 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         
         start_time = time.time()
 
-        simulator = GameSimulator(
-            model=model,
-            tokenizer=tokenizer,
-            device=device,
-            temperature=simulation_config.get("temperature", 1.0),
-        )
+        if device.type == "cuda":
+            model.to("cpu")
+            move_optimizer_state(trainer.optimizer, torch.device("cpu"))
+            torch.cuda.empty_cache()
+
         model.eval()
         collected = 0
         for _ in range(selfplay_cfg["games_per_iteration"]):
@@ -173,12 +199,19 @@ def run_training(config: Dict[str, Dict[str, Any]]):
             collected += 1
         model.train()
 
+        simulator.clear_player_models()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+            model.to(device)
+            move_optimizer_state(trainer.optimizer, device)
+
         collection_time = time.time() - start_time
         print(f"Collected {collected} games in {collection_time:.2f}s")
         
         # Log game metrics
         buffer_stats = buffer.get_statistics()
         buffer_stats_str = json.dumps(buffer_stats, indent=4)
+        print("Buffer Stats: ")
         print(buffer_stats_str)
         
         if use_wandb:
@@ -191,25 +224,10 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         # === Phase 2: Training ===
         print(f"\nPhase 2: Training for {selfplay_cfg['train_steps_per_iteration']} steps...")
         
-        batch_size = training_cfg["batch_size"]
-        num_games = len(buffer.get_games_snapshot())
+        num_games = buffer.num_games()
         if num_games == 0:
             print("Not enough games in buffer (0), skipping training")
             continue
-
-        # Create dataloader (use num_workers=0 to avoid pickle issues with spawn)
-        dataset = GameSequenceDataset(
-            buffer=buffer,
-            token_config=token_config,
-            batch_size=batch_size,
-            shuffle_games=False,
-        )
-        dataloader = DataLoader(
-            dataset,
-            batch_size=None,
-            num_workers=0,
-            pin_memory=True,
-        )
         
         train_start = time.time()
         steps_done = 0
@@ -238,7 +256,8 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         
         train_time = time.time() - train_start
         print(f"Training completed in {train_time:.2f}s")
-        
+
+
         # === Phase 3: Checkpointing ===
         if (iteration + 1) % logging_cfg["save_interval"] == 0:
             checkpoint_path = trainer.save_checkpoint(

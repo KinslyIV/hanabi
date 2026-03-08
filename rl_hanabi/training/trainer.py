@@ -75,11 +75,11 @@ class HanabiTrainer:
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         
-        tokens = batch["tokens"].to(self.device)
-        legal_moves_mask = batch["legal_moves_mask"].to(self.device).bool()
-        chosen_action_idx = batch["chosen_action_idx"].to(self.device).long()
-        reward = batch["reward"].to(self.device).float().squeeze(-1)
-        current_player = batch["current_player"].to(self.device)
+        tokens = batch["tokens"]
+        legal_moves_mask = batch["legal_moves_mask"]
+        chosen_action_idx = batch["chosen_action_idx"]
+        reward = batch["reward"].squeeze(-1)
+        current_player = batch["current_player"]
 
         card_action_logits, value = self.model(tokens)
         action_logits = self.tokenizer.action_logits_from_model(card_action_logits, tokens, current_player)

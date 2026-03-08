@@ -18,6 +18,7 @@ def apply_overrides(config: Dict[str, Dict[str, Any]], overrides: Dict[str, Any]
         "game_config",
         "exploration",
         "logging",
+        "play",
         "wandb",
     ]
     for key, value in overrides.items():
@@ -46,6 +47,7 @@ def load_config(config_path: Path, preset: Optional[str]) -> Dict[str, Dict[str,
         "game_config": raw.get("game_config", {}),
         "exploration": raw.get("exploration", {}),
         "logging": raw.get("logging", {}),
+        "play": raw.get("play", {}),
         "wandb": raw.get("wandb", {}),
     }
 
@@ -62,7 +64,7 @@ def load_config(config_path: Path, preset: Optional[str]) -> Dict[str, Dict[str,
     return config
 
 
-def build_game_config(config: Dict[str, Dict[str, Any]]) -> GameConfig:
+def build_game_config(config: Dict[str, Dict[str, Any]], seed=-1) -> GameConfig:
     game_cfg = config["game_config"]
     model_cfg = config["model"]
 
@@ -87,5 +89,5 @@ def build_game_config(config: Dict[str, Dict[str, Any]]) -> GameConfig:
         hand_size=model_cfg["max_hand_size"],
         max_information_tokens=model_cfg["max_info_tokens"],
         max_life_tokens=model_cfg["max_life_tokens"],
-        seed=-1,
+        seed=seed,
     )

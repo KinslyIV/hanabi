@@ -18,7 +18,7 @@ device = "auto"
 # =============================================================================
 [model]
 # Maximum game dimensions (model is trained to handle up to these)
-max_players = 5
+max_players = 3
 max_colors = 5
 max_ranks = 5
 max_hand_size = 5
@@ -54,13 +54,13 @@ batch_size = 16
 # =============================================================================
 [selfplay]
 # Games to play per iteration
-games_per_iteration = 100
+games_per_iteration = 50
 
 # Training steps per iteration
 train_steps_per_iteration = 500
 
 # Total number of iterations
-num_iterations = 100
+num_iterations = 10
 
 # Replay buffer size (number of transitions)
 buffer_size = 10000
@@ -70,7 +70,7 @@ buffer_size = 10000
 # =============================================================================
 # Fixed game settings for training
 [game_config]
-num_players = 5
+num_players = 3
 num_colors = 5
 num_ranks = 5
 
@@ -102,6 +102,28 @@ checkpoint_dir = "checkpoints"
 
 # Buffer save directory (optional)
 buffer_dir = "buffer_dir"
+
+# =============================================================================
+# Play Configuration
+# =============================================================================
+[play]
+# Device for play script (auto, cpu, cuda, cuda:0, etc.)
+device = "auto"
+
+# Checkpoint location (uses checkpoint_latest.pt if present)
+checkpoint_dir = "checkpoints"
+checkpoint = ""
+
+# Action selection settings
+temperature = 0
+topk = 5
+
+# Display settings
+show_hands = true
+max_turns = 0
+
+# Game seed (-1 = random)
+seed = -1
 
 # =============================================================================
 # Weights & Biases Configuration
@@ -176,6 +198,8 @@ learning_rate = 3e-4
 # Minimal configuration for debugging
 # -----------------------------------------------------------------------------
 [presets.debug]
+num_players = 3
+max_players = 3
 num_iterations = 2
 games_per_iteration = 5
 train_steps_per_iteration = 10

@@ -69,7 +69,7 @@ class TokenizationConfig:
 
     @property
     def context_size(self) -> int:
-        return 3 + self.num_colors + self.num_players * self.hand_size + self.max_discard_tokens
+        return 4 + self.num_colors + self.num_players * self.hand_size + self.max_discard_tokens
 
     @property
     def cards_per_color(self) -> int:
@@ -140,7 +140,7 @@ class HLETokenizer:
         N = self.config.num_players
         C = self.config.num_colors
         R = self.config.num_ranks
-        hand_start = 3 + C
+        hand_start = 4 + C
         hand_end = hand_start + N * H
 
         # (batch, num_players, hand_size)
@@ -157,58 +157,38 @@ class HLETokenizer:
 
         # Hint logits: (batch, (N-1)*(C+R)) corresponding to indices [2H .. end)
         hint_dim = (N - 1) * (C + R)
-        hint_logits_per_batch: List[torch.Tensor] = []
 
-        # Still need per-batch loop due to `current_player` varying across the batch.
-        for b in range(batch_size):
-            current = int(current_player[b].item())
+        offsets = torch.arange(1, N, device=device)  # (N-1,)
+        targets = (current_player.view(batch_size, 1) + offsets.view(1, -1)) % N  # (B, N-1)
 
-            color_candidates: dict[int, List[torch.Tensor]] = {}
-            rank_candidates: dict[int, List[torch.Tensor]] = {}
+        gather_idx = targets.view(batch_size, -1, 1).expand(batch_size, N - 1, H)
+        target_hand_tokens = hand_tokens.gather(1, gather_idx)  # (B, N-1, H)
 
-            for offset in range(1, N):
-                target_player = (current + offset) % N
-                for slot_idx in range(H):
-                    token = int(hand_tokens[b, target_player, slot_idx].item())
-                    if token < 2:
-                        continue
-                    color = (token - 2) // R
-                    rank = (token - 2) % R
+        logits_idx = targets.view(batch_size, -1, 1, 1).expand(batch_size, N - 1, H, 4)
+        target_logits = card_logits_view.gather(1, logits_idx)  # (B, N-1, H, 4)
 
-                    # Convert absolute action indices into hint-space indices (0..hint_dim-1)
-                    # Color hint: 2H + (offset-1)*C + color
-                    hint_color_idx = (offset - 1) * C + color
-                    color_candidates.setdefault(hint_color_idx, []).append(
-                        card_logits_view[b, target_player, slot_idx, 2]
-                    )
+        valid = target_hand_tokens >= 2
+        color = (target_hand_tokens - 2).clamp(min=0) // R
+        rank = (target_hand_tokens - 2).clamp(min=0) % R
 
-                    # Rank hint: 2H + (N-1)*C + (offset-1)*R + rank
-                    hint_rank_idx = (N - 1) * C + (offset - 1) * R + rank
-                    rank_candidates.setdefault(hint_rank_idx, []).append(
-                        card_logits_view[b, target_player, slot_idx, 3]
-                    )
+        offset_idx = offsets.view(1, -1, 1).expand(batch_size, N - 1, H) - 1  # (B, N-1, H)
+        color_idx = offset_idx * C + color
+        rank_idx = (N - 1) * C + offset_idx * R + rank
 
-            # Start from -inf and place per-hint maxima out-of-place (keeps autograd)
-            hint_logits_b = torch.full((hint_dim,), -1e9, device=device)
+        color_idx = torch.where(valid, color_idx, torch.zeros_like(color_idx))
+        rank_idx = torch.where(valid, rank_idx, torch.zeros_like(rank_idx))
 
-            if color_candidates or rank_candidates:
-                hint_indices: List[int] = []
-                hint_values: List[torch.Tensor] = []
+        color_vals = torch.where(valid, target_logits[..., 2], torch.full_like(target_logits[..., 2], -1e9))
+        rank_vals = torch.where(valid, target_logits[..., 3], torch.full_like(target_logits[..., 3], -1e9))
 
-                for idx, values in color_candidates.items():
-                    hint_indices.append(idx)
-                    hint_values.append(torch.stack(values).amax())
-                for idx, values in rank_candidates.items():
-                    hint_indices.append(idx)
-                    hint_values.append(torch.stack(values).amax())
+        color_idx = color_idx.view(batch_size, -1)
+        rank_idx = rank_idx.view(batch_size, -1)
+        color_vals = color_vals.view(batch_size, -1)
+        rank_vals = rank_vals.view(batch_size, -1)
 
-                index_tensor = torch.tensor(hint_indices, device=device, dtype=torch.long)
-                value_tensor = torch.stack(hint_values)
-                hint_logits_b = hint_logits_b.index_copy(0, index_tensor, value_tensor)
-
-            hint_logits_per_batch.append(hint_logits_b)
-
-        hint_logits = torch.stack(hint_logits_per_batch, dim=0)  # (batch, hint_dim)
+        hint_logits = torch.full((batch_size, hint_dim), -1e9, device=device)
+        hint_logits = hint_logits.scatter_reduce(1, color_idx, color_vals, reduce="amax", include_self=True)
+        hint_logits = hint_logits.scatter_reduce(1, rank_idx, rank_vals, reduce="amax", include_self=True)
 
         action_logits = torch.cat([discard_logits, play_logits, hint_logits], dim=1)
         return action_logits
@@ -340,10 +320,20 @@ class HLETokenizer:
     def tokenize_state_and_action(
         self,
         state: "HLEGameState",
-        action: Union[pyhanabi.HanabiMove, int]
+        action: Union[pyhanabi.HanabiMove, int],
+        current_player: int,
+        model_player: int,
     ) -> List[int]:
         self._validate_state_config(state)
         tokens: List[int] = []
+
+        if current_player < 0 or current_player >= self.config.num_players:
+            raise ValueError(f"current_player {current_player} out of bounds")
+
+        # Tells the model who made the move 
+        # This player must not necessarily be masked 
+        # since tzhe model here does not more play for all players but only for one
+        tokens.append(current_player)
 
         tokens.append(state.life_tokens())
         tokens.append(state.information_tokens())
@@ -355,8 +345,10 @@ class HLETokenizer:
         tokens.extend(self.tokenize_fireworks(state))
 
         hands = list(state.state.player_hands())
+
+        # Mask the player who the model is playing as
         for player_idx in range(self.config.num_players):
-            is_current = player_idx == state.current_player_index
+            is_current = player_idx == model_player
             tokens.extend(self.tokenize_hand(list(hands[player_idx]), mask=is_current))
 
         tokens.extend(self.tokenize_discard_pile(state))
