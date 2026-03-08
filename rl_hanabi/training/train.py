@@ -113,6 +113,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
             project_name=wandb_cfg.get("project", "hanabi-selfplay"),
             config=full_config,
             run_name=wandb_cfg.get("run_name"),
+            dir_path=wandb_cfg.get("dir_path", "./wandb"),
             tags=wandb_cfg.get("tags", "").split(",") if wandb_cfg.get("tags") else None,
         )
         wandb.watch(model, log="all", log_freq=100)

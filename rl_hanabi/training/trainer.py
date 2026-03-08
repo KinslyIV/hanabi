@@ -205,6 +205,7 @@ def init_wandb(
     project_name: str,
     config: Dict[str, Any],
     run_name: Optional[str] = None,
+    dir_path = None,
     tags: Optional[List[str]] = None,
 ) -> wandb.Run: 
     """Initialize WandB run."""
@@ -212,6 +213,7 @@ def init_wandb(
         entity="immatakuete-ostfalia-university-of-applied-sciences",
         project=project_name,
         name=run_name,
+        dir=dir_path,
         config=config,
         tags=tags or [],
         save_code=True,
