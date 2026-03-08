@@ -28,7 +28,7 @@ max_life_tokens = 3
 # Transformer architecture
 num_heads = 4
 num_layers = 4
-d_model = 128
+d_model = 512
 action_dim = 4
 
 # =============================================================================
@@ -36,7 +36,7 @@ action_dim = 4
 # =============================================================================
 [training]
 # Optimizer settings
-learning_rate = 1e-4
+learning_rate = 1e-3
 weight_decay = 0.01
 max_grad_norm = 1.0
 
@@ -44,17 +44,15 @@ max_grad_norm = 1.0
 scheduler_t0 = 1000
 scheduler_t_mult = 2
 min_lr = 1e-6
+critic_loss_weight = 1
 
 # Batch size
-batch_size = 256
+batch_size = 16
 
 # =============================================================================
 # Self-Play Configuration
 # =============================================================================
 [selfplay]
-# Number of parallel workers (0 = auto-detect based on CPU count)
-num_workers = 0
-
 # Games to play per iteration
 games_per_iteration = 100
 
@@ -65,19 +63,16 @@ train_steps_per_iteration = 500
 num_iterations = 100
 
 # Replay buffer size (number of transitions)
-buffer_size = 100000
+buffer_size = 10000
 
 # =============================================================================
-# Game Configuration Ranges
+# Game Configuration
 # =============================================================================
-# Games will be sampled uniformly from these ranges
+# Fixed game settings for training
 [game_config]
-min_players = 2
-max_players = 5
-min_colors = 3
-max_colors = 5
-min_ranks = 3
-max_ranks = 5
+num_players = 5
+num_colors = 5
+num_ranks = 5
 
 # =============================================================================
 # Exploration Parameters
@@ -106,7 +101,7 @@ save_interval = 10
 checkpoint_dir = "checkpoints"
 
 # Buffer save directory (optional)
-buffer_dir = null
+buffer_dir = "buffer_dir"
 
 # =============================================================================
 # Weights & Biases Configuration
@@ -119,7 +114,7 @@ enabled = true
 project = "hanabi-selfplay"
 
 # Run name (optional, auto-generated if not specified)
-run_name = null
+run_name = "symphonie-des-ondines"
 
 # Tags for this run (comma-separated)
 tags = "self-play,training"
@@ -147,8 +142,7 @@ save_interval = 5
 # Focus on 2-player games for simpler training
 # -----------------------------------------------------------------------------
 [presets.two_player]
-min_players = 2
-max_players = 2
+num_players = 2
 games_per_iteration = 200
 train_steps_per_iteration = 1000
 
@@ -157,10 +151,8 @@ train_steps_per_iteration = 1000
 # Train on standard 5-color, 5-rank games only
 # -----------------------------------------------------------------------------
 [presets.full_hanabi]
-min_colors = 5
-max_colors = 5
-min_ranks = 5
-max_ranks = 5
+num_colors = 5
+num_ranks = 5
 games_per_iteration = 150
 train_steps_per_iteration = 750
 
@@ -169,7 +161,6 @@ train_steps_per_iteration = 750
 # For serious training runs
 # -----------------------------------------------------------------------------
 [presets.large_scale]
-num_workers = 8
 games_per_iteration = 500
 train_steps_per_iteration = 2000
 num_iterations = 500
@@ -185,7 +176,6 @@ learning_rate = 3e-4
 # Minimal configuration for debugging
 # -----------------------------------------------------------------------------
 [presets.debug]
-num_workers = 1
 num_iterations = 2
 games_per_iteration = 5
 train_steps_per_iteration = 10

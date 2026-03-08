@@ -2,28 +2,18 @@
 
 from rl_hanabi.training.game_simulator import (
     GameSimulator,
-    GameConfig,
     GameResult,
-    Transition,
-    sample_game_config,
+    Transition
 )
+from rl_hanabi.game import GameConfig
 from rl_hanabi.training.data_collection import (
     ReplayBuffer,
-    HanabiDataset,
-    create_dataloader,
+    GameSequenceDataset,
 )
 from rl_hanabi.training.trainer import (
     HanabiTrainer,
     log_game_metrics,
     init_wandb,
-)
-
-# Distributed training imports
-from rl_hanabi.training.distributed import (
-    GPUClient,
-    GPUClientConfig,
-    GPUServer,
-    GPUTrainer,
 )
 
 __all__ = [
@@ -32,18 +22,11 @@ __all__ = [
     "GameConfig",
     "GameResult",
     "Transition",
-    "sample_game_config",
     # Data collection
     "ReplayBuffer",
-    "HanabiDataset",
-    "create_dataloader",
+    "GameSequenceDataset",
     # Training
     "HanabiTrainer",
     "log_game_metrics",
     "init_wandb",
-    # Distributed training
-    "GPUClient",
-    "GPUClientConfig",
-    "GPUServer",
-    "GPUTrainer",
 ]

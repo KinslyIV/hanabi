@@ -18,7 +18,6 @@ class ActionDecoderConfig:
     num_heads: int = 4
     num_layers: int = 4
     d_model: int = 128
-    action_dim: int = 4
     dropout: float = 0.2
     bias: bool = False
 
@@ -68,13 +67,27 @@ class RecurrentFeedForward(nn.Module):
         self.cell = nn.LSTMCell(config.d_model * 4, config.d_model * 4)
         self.out_proj = nn.Linear(config.d_model * 4, config.d_model)
         self.dropout = nn.Dropout(config.dropout)
-        self._h : torch.Tensor | None = None
-        self._c = None
+        self._h: torch.Tensor | None = None
+        self._c: torch.Tensor | None = None
 
 
-    def reset_state(self) -> None:
-        self._h = None
-        self._c = None
+    def reset_state(self, reset_mask: Optional[torch.Tensor] = None) -> None:
+        if reset_mask is None:
+            self._h = None
+            self._c = None
+            return
+
+        if self._h is None or self._c is None:
+            return
+
+        if reset_mask.dim() != 1 or reset_mask.size(0) != self._h.size(0):
+            self._h = None
+            self._c = None
+            return
+
+        mask = reset_mask.to(self._h.device).view(-1, 1, 1)
+        self._h = self._h.masked_fill(mask, 0.0)
+        self._c = self._c.masked_fill(mask, 0.0)
 
     def forward(self, x):
         batch_size, context_len, d_model = x.shape
@@ -101,10 +114,10 @@ class RecurrentFeedForward(nn.Module):
 
         h_flat = h.contiguous().view(batch_size * context_len, d_model * 4)
         c_flat = c.contiguous().view(batch_size * context_len, d_model * 4)
-        out, (h_flat, c_flat) = self.cell(x_flat, (h_flat, c_flat))
+        h_flat, c_flat = self.cell(x_flat, (h_flat, c_flat))
         self._h = h_flat.view(batch_size, context_len, d_model * 4).detach()
         self._c = c_flat.view(batch_size, context_len, d_model * 4).detach()
-        out = out.view(batch_size, context_len, d_model * 4)
+        out = h_flat.view(batch_size, context_len, d_model * 4)
         return self.dropout(self.out_proj(out))
     
 
@@ -127,6 +140,9 @@ class Block(nn.Module):
         update_flat = update.contiguous().view(batch_size * seq_len, d_model)
         out_flat = cell(update_flat, x_flat)
         return out_flat.view(batch_size, seq_len, d_model)
+
+    def reset_state(self, reset_mask: Optional[torch.Tensor] = None) -> None:
+        self.ffwd.reset_state(reset_mask)
 
     def forward(self, x, *, attn_mask: Optional[torch.Tensor] = None):
         attn_out = self.multi_head(self.ln1(x), attn_mask=attn_mask)
@@ -156,13 +172,12 @@ class ActionDecoder(nn.Module):
             config = ActionDecoderConfig(
                 num_colors=token_config.num_colors,
                 num_ranks=token_config.num_ranks,
-                max_cards=token_config.num_card_tokens,
+                max_cards=token_config.total_cards,
                 hand_size=token_config.hand_size,
                 num_players=token_config.num_players,
                 num_heads=num_heads,
                 num_layers=num_layers,
-                d_model=d_model,
-                action_dim=action_dim,
+                d_model=d_model
             )
 
         # Store max dimensions as instance attributes
@@ -257,3 +272,8 @@ class ActionDecoder(nn.Module):
         value = self.state_value_head(x[:, 0, :])
 
         return card_action_logits, value
+
+    def reset_state(self, reset_mask: Optional[torch.Tensor] = None) -> None:
+        for block in self.blocks:
+            block.reset_state(reset_mask)
+

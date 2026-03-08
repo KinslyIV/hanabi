@@ -69,7 +69,22 @@ class TokenizationConfig:
 
     @property
     def context_size(self) -> int:
-        return 3 + self.num_card_tokens + self.num_players * self.hand_size + self.num_colors
+        return 3 + self.num_colors + self.num_players * self.hand_size + self.max_discard_tokens
+
+    @property
+    def cards_per_color(self) -> int:
+        # Standard Hanabi distribution: 3, 2, ..., 2, 1
+        if self.num_ranks <= 1:
+            return 3
+        return 3 + 2 * (self.num_ranks - 2) + 1
+
+    @property
+    def total_cards(self) -> int:
+        return self.num_colors * self.cards_per_color
+
+    @property
+    def max_discard_tokens(self) -> int:
+        return max(0, self.total_cards)
     
 
 
@@ -346,7 +361,16 @@ class HLETokenizer:
 
         tokens.extend(self.tokenize_discard_pile(state))
         
-       # May be pad the list before retuerning
+        if len(tokens) > self.config.context_size:
+            discard_len = len(state.state.discard_pile())
+            raise ValueError(
+                "Token sequence too long: "
+                f"len={len(tokens)} > context_size={self.config.context_size}. "
+                f"discard={discard_len}, num_players={self.config.num_players}, "
+                f"num_colors={self.config.num_colors}, num_ranks={self.config.num_ranks}, "
+                f"hand_size={self.config.hand_size}"
+            )
+
         return tokens
 
 
