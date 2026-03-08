@@ -9,6 +9,29 @@ from hanabi_learning_environment import pyhanabi
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class GameConfig:
+    num_players: int = 2
+    num_colors: int = 5
+    num_ranks: int = 5
+    hand_size: int = 5
+    max_information_tokens: int = 8
+    max_life_tokens: int = 3
+    seed: int = -1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "numSuits": self.num_colors,
+            "numRanks": self.num_ranks,
+            "cardsPerHand": self.hand_size,
+            "clueTokens": self.max_information_tokens,
+            "strikeTokens": self.max_life_tokens,
+            "seed": self.seed,
+        }
+    
+
+
 @dataclass
 class HLEGameState:
     """Wrapper around pyhanabi.HanabiState used for MCTS simulations.
@@ -20,14 +43,16 @@ class HLEGameState:
 
     game: pyhanabi.HanabiGame
     state: pyhanabi.HanabiState
+    game_config: Optional[GameConfig] = None
 
     # ----- construction -------------------------------------------------
 
     @classmethod
     def from_table_options(
         cls,
-        options: Dict[str, Any],
-        num_players: int,
+        game_config: GameConfig,
+        *,
+        starting_player: int = 0,
     ) -> "HLEGameState":
         """Create a fresh HanabiGame + initial HanabiState.
 
@@ -44,16 +69,14 @@ class HLEGameState:
         The key is that we don't try to "pre-sync" HLE to the website's starting player.
         Instead, we let the action stream do the synchronization.
         """
-        starting_player = int(options.get("startingPlayer", 0))
-
         params = {
-            "players": num_players,
-            "colors": int(options.get("numSuits", 5)),
-            "ranks": int(options.get("numRanks", 5)),
-            "hand_size": int(options.get("cardsPerHand", 5)),
-            "max_information_tokens": int(options.get("clueTokens", 8)),
-            "max_life_tokens": int(options.get("strikeTokens", 3)),
-            "seed": int(options.get("seed", -1)),
+            "players": game_config.num_players,
+            "colors": game_config.num_colors,
+            "ranks": game_config.num_ranks,
+            "hand_size": game_config.hand_size,
+            "max_information_tokens": game_config.max_information_tokens,
+            "max_life_tokens": game_config.max_life_tokens,
+            "seed": game_config.seed,
             "random_start_player": False,
             "observation_type": pyhanabi.AgentObservationType.CARD_KNOWLEDGE,
         }
@@ -69,7 +92,7 @@ class HLEGameState:
         # This will be aligned after processing the game's action history.
         logger.info(f"HLE initialized: website startingPlayer={starting_player}, HLE cur_player={state.cur_player()}, player_shift=0")
             
-        return cls(game=game, state=state)
+        return cls(game=game, state=state, game_config=game_config)
     
     def __repr__(self) -> str:
         return self.state.__repr__()
@@ -80,7 +103,8 @@ class HLEGameState:
         """Deep copy for use as a root in MCTS."""
         return HLEGameState(
             game=self.game,
-            state=self.state.copy()
+            state=self.state.copy(),
+            game_config=self.game_config,
         )
 
     @property
