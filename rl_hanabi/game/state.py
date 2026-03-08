@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any
 from hanabi_learning_environment import pyhanabi
 from .game_types import ACTION, CLUE, PerformAction
 from .hle_state import HLEGameState
+from rl_hanabi.training.token_utils import GameConfig
 
 
 MAX_CLUES = 8
@@ -40,8 +41,18 @@ class GameState:
 
         # Create a new HLE game/state matching the table options if enabled.
         if self.enable_hle:
+            game_config = GameConfig(
+                num_players=self.num_players,
+                num_colors=self.options.get("numSuits", 5),
+                num_ranks=self.options.get("numRanks", 5),
+                hand_size=self.options.get("cardsPerHand", 5),
+                max_information_tokens=self.options.get("clueTokens", 8),
+                max_life_tokens=self.options.get("strikeTokens", 3),
+                seed=self.options.get("seed", -1),
+            )
             self.hle_state = HLEGameState.from_table_options(
-                self.options, self.num_players
+                game_config,
+                starting_player=self.options.get("startingPlayer", 0),
             )
         else:
             self.hle_state = None
