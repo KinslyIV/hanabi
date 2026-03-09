@@ -72,6 +72,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         num_heads=model_cfg["num_heads"],
         num_layers=model_cfg["num_layers"],
         d_model=model_cfg["d_model"],
+        dropout=model_cfg["dropout"]
     )
     
     # Create model
