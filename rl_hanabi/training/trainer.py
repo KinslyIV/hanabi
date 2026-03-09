@@ -91,6 +91,8 @@ class HanabiTrainer:
         value_1d = value.squeeze(-1)
         reward = reward.reshape(value_1d.shape)
         advantage = reward - value_1d.detach()
+        if advantage.numel() > 1:
+            advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
         actor_loss = -(advantage * chosen_log_prob).mean()
         critic_loss = F.mse_loss(value_1d, reward)
         total_loss = actor_loss + self.c * critic_loss
@@ -119,8 +121,8 @@ class HanabiTrainer:
         loss.backward()
         
         # Gradient clipping
-        max_grad_norm = self.config.get("max_grad_norm", 1.0)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+        # max_grad_norm = self.config.get("max_grad_norm", 1.0)
+        # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
         
         self.optimizer.step()
         self.scheduler.step()

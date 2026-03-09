@@ -176,9 +176,8 @@ class GameSimulator:
 
         final_score = state.score()
         max_score = state.max_score()
-        normalized_reward = final_score / max_score if max_score > 0 else 0.0
         for transition in transitions:
-            transition.reward = normalized_reward
+            transition.reward = final_score
 
         return GameResult(
             transitions=transitions,
