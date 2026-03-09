@@ -210,7 +210,7 @@ class ActionDecoder(nn.Module):
         self.pos_emb = nn.Embedding(self.context_size + 1, config.d_model)
 
         self.card_action_head = nn.Linear(config.d_model, 4)
-        self.state_value_head = nn.Sequential(nn.Linear(config.d_model, 1), nn.Sigmoid())
+        self.state_value_head = nn.Linear(config.d_model, 1)
 
         self.blocks = nn.ModuleList([Block(config) for _ in range(config.num_layers)])
         self.dropout = nn.Dropout(config.dropout)
