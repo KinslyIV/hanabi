@@ -226,9 +226,10 @@ def run_training(config: Dict[str, Dict[str, Any]]):
             steps_done += 1
             
             if steps_done % logging_cfg["log_interval"] == 0:
-                print(f"  Step {steps_done}/{selfplay_cfg['train_steps_per_iteration']}, Loss: {metrics['total_loss']:.4f}, "
-                      f"Value Loss: {metrics['value_loss']:.4f}, Action Loss: {metrics['action_loss']:.4f}, "
-                      f"Mean Reward: {metrics['mean_reward']:.4f}, LR: {metrics['learning_rate']:.6f}")
+                print(f"  Step {steps_done}/{selfplay_cfg['train_steps_per_iteration']},    Loss: {metrics['total_loss']:.4f},    "
+                      f"Value Loss: {metrics['value_loss']:.4f},    Action Loss: {metrics['action_loss']:.4f},    "
+                      f"Mean Reward: {metrics['mean_reward']:.4f},    LR: {metrics['learning_rate']:.6f}    "
+                      f"Mean Advantage: {metrics['mean_advantage']:.4f}")
                 
                 if use_wandb:
                     wandb.log({
@@ -237,6 +238,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
                         "train/action_loss": metrics["action_loss"],
                         "train/value_loss": metrics["value_loss"],
                         "train/mean_reward": metrics["mean_reward"],
+                        "train/mean_advantage": metrics["mean_advantage"],
                         "train/learning_rate": metrics["learning_rate"],
                     })
         

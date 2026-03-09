@@ -66,7 +66,8 @@ class HanabiTrainer:
             "total_loss": [],
             "value_loss": [],
             "action_loss": [],
-            "mean_reward": []
+            "mean_reward": [],
+            "mean_advantage": []
         }
 
 
@@ -91,8 +92,6 @@ class HanabiTrainer:
         value_1d = value.squeeze(-1)
         reward = reward.reshape(value_1d.shape)
         advantage = reward - value_1d.detach()
-        if advantage.numel() > 1:
-            advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
         actor_loss = -(advantage * chosen_log_prob).mean()
         critic_loss = F.mse_loss(value_1d, reward)
         total_loss = actor_loss + self.c * critic_loss
@@ -102,7 +101,8 @@ class HanabiTrainer:
             "total_loss": total_loss.item(),
             "action_loss": actor_loss.item(),
             "value_loss": critic_loss.item(),
-            "mean_reward": reward.mean().item()
+            "mean_reward": reward.mean().item(),
+            "mean_advantage": advantage.mean().item()
         }
 
         return total_loss, metrics
