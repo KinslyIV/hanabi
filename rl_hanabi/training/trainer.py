@@ -92,7 +92,7 @@ class HanabiTrainer:
         value_1d = value.squeeze(-1)
         reward = reward.reshape(value_1d.shape)
         advantage = reward - value_1d.detach()
-        actor_loss = -(advantage * chosen_log_prob).mean()
+        actor_loss = -(advantage * 10 * chosen_log_prob).mean()
         critic_loss = F.mse_loss(value_1d, reward)
         total_loss = actor_loss + self.c * critic_loss
 
