@@ -155,7 +155,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         buffer=buffer,
         token_config=token_config,
         batch_size=batch_size,
-        shuffle_games=True,
+        shuffle_games=False,
         device=device,
     )
     dataloader = DataLoader(
