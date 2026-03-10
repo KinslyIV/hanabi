@@ -40,6 +40,7 @@ class HanabiTrainer:
         self.token_config = tokenizer.config
         self.checkpoint_dir = checkpoint_dir
         self.c = config.get("critic_loss_weight", 1.0)
+        self.c_e = config.get("entropy_loss_weight", 0.0)
 
         if checkpoint_dir:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -66,8 +67,10 @@ class HanabiTrainer:
             "total_loss": [],
             "value_loss": [],
             "action_loss": [],
+            "entropy_loss": [],
             "mean_reward": [],
-            "mean_advantage": []
+            "mean_advantage": [],
+            "mean_entropy": [],
         }
 
 
@@ -87,22 +90,27 @@ class HanabiTrainer:
 
         masked_logits = action_logits.masked_fill(~legal_moves_mask, -1e9)
         log_probs = F.log_softmax(masked_logits, dim=-1)
+        probs = log_probs.exp()
         chosen_log_prob = log_probs.gather(1, chosen_action_idx.unsqueeze(1)).squeeze(1)
 
         value_1d = value.squeeze(-1)
-        reward = reward.reshape(value_1d.shape) * 100
+        reward = reward.reshape(value_1d.shape) * 10
         advantage = reward - value_1d.detach()
         actor_loss = -(advantage * chosen_log_prob).mean()
         critic_loss = F.mse_loss(value_1d, reward)
-        total_loss = actor_loss + self.c * critic_loss
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+        entropy_loss = -self.c_e * entropy
+        total_loss = actor_loss + self.c * critic_loss + entropy_loss
 
 
         metrics = {
             "total_loss": total_loss.item(),
             "action_loss": actor_loss.item(),
             "value_loss": critic_loss.item(),
+            "entropy_loss": entropy_loss.item(),
             "mean_reward": reward.mean().item(),
-            "mean_advantage": advantage.mean().item()
+            "mean_advantage": advantage.mean().item(),
+            "mean_entropy": entropy.item(),
         }
 
         return total_loss, metrics

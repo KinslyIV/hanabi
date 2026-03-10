@@ -46,6 +46,7 @@ scheduler_t0 = 1000
 scheduler_t_mult = 2
 min_lr = 1e-6
 critic_loss_weight = 1.0
+entropy_loss_weight = 0.01
 
 # Batch size
 batch_size = 64
