@@ -30,7 +30,34 @@ from rl_hanabi.training.trainer import (
     log_game_metrics,
     init_wandb,
 )
-def run_training(config: Dict[str, Dict[str, Any]]):
+
+
+def _resolve_resume_checkpoint(
+    *,
+    resume_path: str | None,
+    checkpoint_dir: Path,
+) -> Path | None:
+    if resume_path:
+        candidate = Path(resume_path)
+        return candidate if candidate.exists() else None
+
+    candidate = checkpoint_dir / "checkpoint_latest.pt"
+    if candidate.exists():
+        return candidate
+
+    fallback = Path("checkpoints") / "checkpoint_latest.pt"
+    if fallback.exists():
+        return fallback
+
+    return None
+
+
+def run_training(
+    config: Dict[str, Dict[str, Any]],
+    *,
+    resume: bool = False,
+    resume_path: str | None = None,
+):
     """Main training loop."""
     
     # Set random seeds
@@ -83,7 +110,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
     
     # Load checkpoint if specified
     checkpoint_path = config["default"].get("checkpoint")
-    if checkpoint_path:
+    if checkpoint_path and not resume:
         checkpoint = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         print(f"Loaded checkpoint from {checkpoint_path}")
@@ -148,7 +175,25 @@ def run_training(config: Dict[str, Dict[str, Any]]):
         tokenizer=tokenizer,
         device=device,
         temperature=simulation_config.get("temperature", 1.0),
+        teacher_label_prob=training_cfg.get("teacher_label_prob", 0.0),
     )
+
+    start_iteration = 0
+    if resume:
+        resume_ckpt = _resolve_resume_checkpoint(
+            resume_path=resume_path,
+            checkpoint_dir=checkpoint_dir,
+        )
+        if resume_ckpt is None:
+            print("Resume requested, but no checkpoint was found. Starting fresh.")
+        else:
+            checkpoint = trainer.load_checkpoint(resume_ckpt)
+            start_iteration = int(checkpoint.get("iteration", 0))
+            ckpt_sim_cfg = checkpoint.get("simulation_config")
+            if isinstance(ckpt_sim_cfg, dict) and "temperature" in ckpt_sim_cfg:
+                simulation_config["temperature"] = float(ckpt_sim_cfg["temperature"])
+                simulator.temperature = simulation_config["temperature"]
+            print(f"Resuming from iteration {start_iteration + 1}")
 
     batch_size = training_cfg["batch_size"]
     dataset = GameSequenceDataset(
@@ -170,7 +215,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
     game_config = build_game_config(config)
     
     # Main training loop
-    for iteration in range(selfplay_cfg["num_iterations"]):
+    for iteration in range(start_iteration, selfplay_cfg["num_iterations"]):
         print(f"\n{'='*60}")
         print(f"Iteration {iteration + 1}/{selfplay_cfg['num_iterations']}")
         print(f"{'='*60}")
@@ -238,6 +283,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
             if steps_done % logging_cfg["log_interval"] == 0:
                 print(f"  Step {steps_done}/{selfplay_cfg['train_steps_per_iteration']},    Loss: {metrics['total_loss']:.4f},    "
                       f"Value Loss: {metrics['value_loss']:.4f},    Action Loss: {metrics['action_loss']:.4f},    "
+                      f"BC Loss: {metrics.get('bc_loss', 0.0):.4f},    "
                       f"Entropy Loss: {metrics['entropy_loss']:.4f},    Mean Entropy: {metrics['mean_entropy']:.4f},    "
                       f"Mean Reward: {metrics['mean_reward']:.4f},    LR: {metrics['learning_rate']:.6f}    "
                       f"Mean Advantage: {metrics['mean_advantage']:.4f}")
@@ -248,6 +294,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
                         "train/loss": metrics["total_loss"],
                         "train/action_loss": metrics["action_loss"],
                         "train/value_loss": metrics["value_loss"],
+                        "train/bc_loss": metrics.get("bc_loss", 0.0),
                         "train/entropy_loss": metrics["entropy_loss"],
                         "train/mean_reward": metrics["mean_reward"],
                         "train/mean_advantage": metrics["mean_advantage"],
@@ -266,6 +313,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
                 extra_data={
                     "iteration": iteration + 1,
                     "buffer_stats": buffer_stats,
+                    "simulation_config": simulation_config,
                 },
             )
             
@@ -273,7 +321,13 @@ def run_training(config: Dict[str, Dict[str, Any]]):
                 wandb.save(str(checkpoint_path))
         
         # Save latest checkpoint
-        trainer.save_checkpoint(filename="checkpoint_latest.pt")
+        trainer.save_checkpoint(
+            filename="checkpoint_latest.pt",
+            extra_data={
+                "iteration": iteration + 1,
+                "simulation_config": simulation_config,
+            },
+        )
         
         # Clear game results to save memory (keep transitions)
         buffer.clear_game_results()
@@ -309,10 +363,21 @@ def main():
         default=None,
         help="Preset name from config.toml (optional)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from checkpoint_latest.pt in checkpoint_dir (restores optimizer/scheduler)",
+    )
+    parser.add_argument(
+        "--resume-path",
+        type=str,
+        default=None,
+        help="Explicit checkpoint path to resume from (overrides checkpoint_latest.pt)",
+    )
 
     args = parser.parse_args()
     config = load_config(Path(args.config), args.preset)
-    run_training(config)
+    run_training(config, resume=args.resume, resume_path=args.resume_path)
 
 
 if __name__ == "__main__":

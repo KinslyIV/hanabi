@@ -188,6 +188,8 @@ class GameSequenceDataset(IterableDataset):
         return_list = []
         done_list = []
         current_player_list = []
+        teacher_action_idx_list = []
+        teacher_mask_list = []
         num_players_list = []
         num_colors_list = []
         num_ranks_list = []
@@ -202,6 +204,8 @@ class GameSequenceDataset(IterableDataset):
             return_list.append(t.return_value)
             done_list.append(t.done)
             current_player_list.append(t.current_player)
+            teacher_action_idx_list.append(getattr(t, "teacher_action_idx", -1))
+            teacher_mask_list.append(bool(getattr(t, "teacher_mask", False)))
             num_players_list.append(t.game_config.get("num_players", 2))
             num_colors_list.append(t.game_config.get("num_colors", 5))
             num_ranks_list.append(t.game_config.get("num_ranks", 5))
@@ -216,6 +220,8 @@ class GameSequenceDataset(IterableDataset):
         returns = torch.tensor(return_list, dtype=torch.float32, device=device)
         done = torch.tensor(done_list, dtype=torch.bool, device=device)
         current_player = torch.tensor(current_player_list, dtype=torch.long, device=device)
+        teacher_action_idx = torch.tensor(teacher_action_idx_list, dtype=torch.long, device=device)
+        teacher_mask = torch.tensor(teacher_mask_list, dtype=torch.bool, device=device)
         num_players = torch.tensor(num_players_list, dtype=torch.long, device=device)
         num_colors = torch.tensor(num_colors_list, dtype=torch.long, device=device)
         num_ranks = torch.tensor(num_ranks_list, dtype=torch.long, device=device)
@@ -230,6 +236,8 @@ class GameSequenceDataset(IterableDataset):
             "returns": returns,
             "done": done,
             "current_player": current_player,
+            "teacher_action_idx": teacher_action_idx,
+            "teacher_mask": teacher_mask,
             "num_players": num_players,
             "num_colors": num_colors,
             "num_ranks": num_ranks,

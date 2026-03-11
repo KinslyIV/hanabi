@@ -41,6 +41,7 @@ class HanabiTrainer:
         self.checkpoint_dir = checkpoint_dir
         self.c = config.get("critic_loss_weight", 1.0)
         self.c_e = config.get("entropy_loss_weight", 0.0)
+        self.c_bc = config.get("bc_loss_weight", 0.0)
 
         if checkpoint_dir:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -68,6 +69,7 @@ class HanabiTrainer:
             "value_loss": [],
             "action_loss": [],
             "entropy_loss": [],
+            "bc_loss": [],
             "mean_reward": [],
             "mean_advantage": [],
             "mean_entropy": [],
@@ -85,6 +87,8 @@ class HanabiTrainer:
         advantage = batch["advantage"]
         returns = batch["returns"]
         current_player = batch["current_player"]
+        teacher_action_idx = batch.get("teacher_action_idx")
+        teacher_mask = batch.get("teacher_mask")
 
         card_action_logits, value = self.model(tokens)
         action_logits = self.tokenizer.action_logits_from_model(card_action_logits, tokens, current_player)
@@ -110,7 +114,16 @@ class HanabiTrainer:
         critic_loss = F.smooth_l1_loss(value_1d, returns_norm)
         entropy = -(probs * log_probs).sum(dim=-1).mean()
         entropy_loss = -self.c_e * entropy
-        total_loss = actor_loss + self.c * critic_loss + entropy_loss
+
+        bc_loss_value = torch.zeros((), device=value_1d.device)
+        if self.c_bc and teacher_action_idx is not None and teacher_mask is not None:
+            mask_f = teacher_mask.to(value_1d.device).float()
+            if mask_f.any():
+                teacher_action_idx = teacher_action_idx.to(value_1d.device)
+                per_item = F.nll_loss(log_probs, teacher_action_idx, reduction="none")
+                bc_loss_value = (per_item * mask_f).sum() / mask_f.sum().clamp_min(1.0)
+
+        total_loss = actor_loss + self.c * critic_loss + entropy_loss + self.c_bc * bc_loss_value
 
 
         metrics = {
@@ -118,6 +131,7 @@ class HanabiTrainer:
             "action_loss": actor_loss.item(),
             "value_loss": critic_loss.item(),
             "entropy_loss": entropy_loss.item(),
+            "bc_loss": bc_loss_value.item(),
             "mean_reward": returns.mean().item(),
             "mean_advantage": advantage.mean().item(),
             "mean_entropy": entropy.item(),

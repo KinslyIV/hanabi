@@ -4,6 +4,7 @@ Game simulator for self-play training using tokenized state/action inputs.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -55,6 +56,8 @@ class Transition:
     game_config: Dict[str, int]
     advantage: float = 0.0
     return_value: float = 0.0
+    teacher_action_idx: int = -1
+    teacher_mask: bool = False
 
 
 @dataclass
@@ -77,6 +80,7 @@ class GameSimulator:
         gamma: float = 0.99,
         lam: float = 0.95,
         early_play_bonus: float = 1.0,
+        teacher_label_prob: float = 0.0,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -85,8 +89,56 @@ class GameSimulator:
         self.gamma = gamma
         self.lam = lam
         self.early_play_bonus = early_play_bonus
+        self.teacher_label_prob = float(teacher_label_prob)
         self._player_models: List[ActionDecoder] = []
         self._player_count = 0
+
+    def _teacher_action_for_obvious_play(
+        self,
+        state: HLEGameState,
+        legal_moves_mask: torch.Tensor,
+        current_player: int,
+    ) -> int | None:
+        """Return an action_idx that is 'obviously correct' from the current player's information.
+
+        Current heuristic: if the player knows (color, rank) for a card and it is
+        immediately playable (fireworks[color] == rank), then playing that slot is correct.
+
+        Returns None when no obvious play exists.
+        """
+
+        observation = state.observation_for_player(current_player)
+        card_knowledge = observation.card_knowledge()[0]
+        fireworks = state.fireworks()
+
+        playable_slots: List[int] = []
+        current_hand = state.state.player_hands()[current_player]
+        for idx in range(len(card_knowledge)):
+            know = card_knowledge[idx]
+            # Case 1 (fully-known): if (color, rank) are known and it's playable from the player's info.
+            if know.color() is not None and know.rank() is not None:
+                if 0 <= know.color() < len(fireworks) and fireworks[know.color()] == know.rank():
+                    playable_slots.append(idx)
+                    continue
+
+            # Case 2 (rank-1 hinted): if rank is known to be 1 (rank==0 in pyhanabi)
+            # and the *actual* card is currently playable, label PLAY.
+            if know.rank == 0 and 0 <= idx < len(current_hand):
+                card = current_hand[idx]
+                if fireworks[card.color()] == card.rank():
+                    playable_slots.append(idx)
+
+        if not playable_slots:
+            return None
+
+        # Find a legal PLAY action for one of the playable slots.
+        legal_indices = torch.nonzero(legal_moves_mask, as_tuple=False).view(-1).tolist()
+        for action_idx in legal_indices:
+            move = state.index_to_move(int(action_idx))
+            if move.type() == pyhanabi.HanabiMoveType.PLAY and move.card_index() in playable_slots:
+                return int(action_idx)
+
+        return None
 
     def _get_player_models(self, num_players: int) -> List[ActionDecoder]:
         if self._player_count != num_players or not self._player_models:
@@ -246,6 +298,18 @@ class GameSimulator:
             if not legal_moves_mask.any():
                 break
 
+            teacher_action_idx = -1
+            teacher_mask = False
+            if self.teacher_label_prob > 0:
+                candidate = self._teacher_action_for_obvious_play(
+                    state,
+                    legal_moves_mask=torch.as_tensor(legal_moves_mask),
+                    current_player=current_player,
+                )
+                if candidate is not None and random.random() < self.teacher_label_prob:
+                    teacher_action_idx = candidate
+                    teacher_mask = True
+
             current_player_tensor = torch.tensor([current_player], device=self.device)
             current_player_value = None
             current_player_tokens: List[int] | None = None
@@ -380,6 +444,8 @@ class GameSimulator:
                         "num_ranks": config.num_ranks,
                         "hand_size": config.hand_size,
                     },
+                    teacher_action_idx=teacher_action_idx,
+                    teacher_mask=teacher_mask,
                 )
             )
 
