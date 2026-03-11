@@ -117,11 +117,17 @@ class HanabiTrainer:
 
         bc_loss_value = torch.zeros((), device=value_1d.device)
         if self.c_bc and teacher_action_idx is not None and teacher_mask is not None:
-            mask_f = teacher_mask.to(value_1d.device).float()
-            if mask_f.any():
-                teacher_action_idx = teacher_action_idx.to(value_1d.device)
-                per_item = F.nll_loss(log_probs, teacher_action_idx, reduction="none")
-                bc_loss_value = (per_item * mask_f).sum() / mask_f.sum().clamp_min(1.0)
+            teacher_action_idx = teacher_action_idx.to(value_1d.device)
+            teacher_mask = teacher_mask.to(value_1d.device)
+
+            n_classes = log_probs.size(-1)
+            valid = teacher_mask & (teacher_action_idx >= 0) & (teacher_action_idx < n_classes)
+            if valid.any():
+                bc_loss_value = F.nll_loss(
+                    log_probs[valid],
+                    teacher_action_idx[valid],
+                    reduction="mean",
+                )
 
         total_loss = actor_loss + self.c * critic_loss + entropy_loss + self.c_bc * bc_loss_value
 
