@@ -152,22 +152,22 @@ class GameSimulator:
                     if after > before:
                         added_rank = after
                         break
-                reward += float(added_rank or 1)
+                reward += 1 + float(added_rank or 1) * 1.5
             else:
-                reward -= 5.0
+                reward -= 2
         elif move_type == pyhanabi.HanabiMoveType.DISCARD:
             blocked_after = self._blocked_colors(state_after)
             blocked_before = blocked_before or set()
             if len(blocked_after) > len(blocked_before):
-                reward -= 8.0
+                reward -= 1.5
             if discarded_playable is True:
-                reward -= 2.0
+                reward -= 1
         elif move_type in (
             pyhanabi.HanabiMoveType.REVEAL_COLOR,
             pyhanabi.HanabiMoveType.REVEAL_RANK,
         ):
             if clue_adds_info is True:
-                reward += 1.0
+                reward += 3
 
         return reward
 
