@@ -54,6 +54,7 @@ class ReplayBuffer:
             num_transitions = len(result.transitions)
             self.total_added += num_transitions
             self.current_size += num_transitions
+
             self.games.append(result.transitions)
 
             self.game_results.append({
@@ -183,6 +184,8 @@ class GameSequenceDataset(IterableDataset):
         legal_moves_mask_list = []
         chosen_action_idx_list = []
         reward_list = []
+        advantage_list = []
+        return_list = []
         done_list = []
         current_player_list = []
         num_players_list = []
@@ -195,6 +198,8 @@ class GameSequenceDataset(IterableDataset):
             legal_moves_mask_list.append(t.legal_moves_mask)
             chosen_action_idx_list.append(t.chosen_action_idx)
             reward_list.append(t.reward)
+            advantage_list.append(t.advantage)
+            return_list.append(t.return_value)
             done_list.append(t.done)
             current_player_list.append(t.current_player)
             num_players_list.append(t.game_config.get("num_players", 2))
@@ -207,6 +212,8 @@ class GameSequenceDataset(IterableDataset):
         legal_moves_mask = torch.tensor(legal_moves_mask_list, dtype=torch.bool, device=device)
         chosen_action_idx = torch.tensor(chosen_action_idx_list, dtype=torch.long, device=device)
         reward = torch.tensor(reward_list, dtype=torch.float32, device=device)
+        advantage = torch.tensor(advantage_list, dtype=torch.float32, device=device)
+        returns = torch.tensor(return_list, dtype=torch.float32, device=device)
         done = torch.tensor(done_list, dtype=torch.bool, device=device)
         current_player = torch.tensor(current_player_list, dtype=torch.long, device=device)
         num_players = torch.tensor(num_players_list, dtype=torch.long, device=device)
@@ -219,6 +226,8 @@ class GameSequenceDataset(IterableDataset):
             "legal_moves_mask": legal_moves_mask,
             "chosen_action_idx": chosen_action_idx,
             "reward": reward,
+            "advantage": advantage,
+            "returns": returns,
             "done": done,
             "current_player": current_player,
             "num_players": num_players,

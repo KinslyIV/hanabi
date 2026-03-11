@@ -82,7 +82,8 @@ class HanabiTrainer:
         tokens = batch["tokens"]
         legal_moves_mask = batch["legal_moves_mask"]
         chosen_action_idx = batch["chosen_action_idx"]
-        reward = batch["reward"]
+        advantage = batch["advantage"]
+        returns = batch["returns"]
         current_player = batch["current_player"]
 
         card_action_logits, value = self.model(tokens)
@@ -94,10 +95,10 @@ class HanabiTrainer:
         chosen_log_prob = log_probs.gather(1, chosen_action_idx.unsqueeze(1)).squeeze(1)
 
         value_1d = value.squeeze(-1)
-        reward = reward.reshape(value_1d.shape) * 10
-        advantage = reward - value_1d.detach()
-        actor_loss = -(advantage * chosen_log_prob).mean()
-        critic_loss = F.mse_loss(value_1d, reward)
+        returns = returns.reshape(value_1d.shape)
+        advantage = advantage.reshape(value_1d.shape)
+        actor_loss = -(advantage.detach() * chosen_log_prob).mean()
+        critic_loss = F.mse_loss(value_1d, returns)
         entropy = -(probs * log_probs).sum(dim=-1).mean()
         entropy_loss = -self.c_e * entropy
         total_loss = actor_loss + self.c * critic_loss + entropy_loss
@@ -108,7 +109,7 @@ class HanabiTrainer:
             "action_loss": actor_loss.item(),
             "value_loss": critic_loss.item(),
             "entropy_loss": entropy_loss.item(),
-            "mean_reward": reward.mean().item(),
+            "mean_reward": returns.mean().item(),
             "mean_advantage": advantage.mean().item(),
             "mean_entropy": entropy.item(),
         }

@@ -10,9 +10,38 @@ from typing import Dict, List
 import numpy as np
 import torch
 
+from hanabi_learning_environment import pyhanabi
+
 from rl_hanabi.game import HLEGameState, GameConfig
 from rl_hanabi.model import ActionDecoder
 from rl_hanabi.model import HLETokenizer
+
+
+def compute_gae(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    dones: torch.Tensor,
+    gamma: float = 0.99,
+    lam: float = 0.95,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    T = len(rewards)
+
+    advantages = torch.zeros_like(rewards)
+    last_adv = torch.zeros((), dtype=rewards.dtype, device=rewards.device)
+
+    for t in reversed(range(T)):
+        if t == T - 1:
+            next_value = torch.zeros_like(values[t])
+        else:
+            next_value = values[t + 1]
+
+        delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
+        last_adv = delta + gamma * lam * (1 - dones[t]) * last_adv
+        advantages[t] = last_adv
+
+    returns = advantages + values
+
+    return advantages, returns
 
 
 @dataclass
@@ -25,6 +54,8 @@ class Transition:
     done: bool
     current_player: int
     game_config: Dict[str, int]
+    advantage: float = 0.0
+    return_value: float = 0.0
 
 
 @dataclass
@@ -43,11 +74,15 @@ class GameSimulator:
         tokenizer: HLETokenizer,
         device: torch.device,
         temperature: float = 1.0,
+        gamma: float = 0.99,
+        lam: float = 0.95,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.temperature = temperature
+        self.gamma = gamma
+        self.lam = lam
         self._player_models: List[ActionDecoder] = []
         self._player_count = 0
 
@@ -71,6 +106,51 @@ class GameSimulator:
     def clear_player_models(self) -> None:
         self._player_models = []
         self._player_count = 0
+
+    def _blocked_colors(self, state: HLEGameState) -> set[int]:
+        fireworks = state.fireworks()
+        discard_pile = state.discard_pile()
+        num_colors = state.game.num_colors()
+        num_ranks = state.game.num_ranks()
+
+        discarded: Dict[tuple[int, int], int] = {}
+        for card in discard_pile:
+            key = (card.color(), card.rank())
+            discarded[key] = discarded.get(key, 0) + 1
+
+        blocked: set[int] = set()
+        for color in range(num_colors):
+            for rank in range(num_ranks):
+                total_copies = state.game.num_cards(color, rank)
+                if discarded.get((color, rank), 0) >= total_copies and fireworks[color] <= rank:
+                    blocked.add(color)
+                    break
+
+        return blocked
+
+    def _compute_step_reward(
+        self,
+        move: pyhanabi.HanabiMove,
+        fireworks_before: List[int],
+        fireworks_after: List[int],
+        blocked_before: set[int] | None,
+        state_after: HLEGameState,
+    ) -> float:
+        reward = 0.0
+        move_type = move.type()
+
+        if move_type == pyhanabi.HanabiMoveType.PLAY:
+            if sum(fireworks_after) > sum(fireworks_before):
+                reward += 1.0
+            else:
+                reward -= 1.0
+        elif move_type == pyhanabi.HanabiMoveType.DISCARD:
+            blocked_after = self._blocked_colors(state_after)
+            blocked_before = blocked_before or set()
+            if len(blocked_after) > len(blocked_before):
+                reward -= 1.0
+
+        return reward
 
     @torch.no_grad()
     def simulate_game(
@@ -138,8 +218,22 @@ class GameSimulator:
 
             action_idx = current_player_action_idx
 
+            move = state.index_to_move(action_idx)
+            fireworks_before = state.fireworks()
+            blocked_before = None
+            if move.type() == pyhanabi.HanabiMoveType.DISCARD:
+                blocked_before = self._blocked_colors(state)
+
             state.apply_move_by_index(action_idx)
             previous_action_idx = action_idx
+
+            reward = self._compute_step_reward(
+                move=move,
+                fireworks_before=fireworks_before,
+                fireworks_after=state.fireworks(),
+                blocked_before=blocked_before,
+                state_after=state,
+            )
 
             # DEBUG
             # move = state.index_to_move(action_idx)
@@ -157,7 +251,7 @@ class GameSimulator:
                     legal_moves_mask=legal_moves_mask.tolist(),
                     chosen_action_idx=action_idx,
                     value=current_player_value.item() if current_player_value is not None else 0.0,
-                    reward=0.0,
+                    reward=reward,
                     done=False,
                     current_player=current_player,
                     game_config={
@@ -176,9 +270,28 @@ class GameSimulator:
 
         final_score = state.score()
         max_score = state.max_score()
-        normalised_score = final_score / max_score if max_score > 0 else 0.0
-        for transition in transitions:
-            transition.reward = normalised_score
+
+        if transitions:
+            transitions[-1].reward += final_score
+
+        if transitions:
+            rewards = torch.tensor([t.reward for t in transitions], dtype=torch.float32)
+            values = torch.tensor([t.value for t in transitions], dtype=torch.float32)
+            dones = torch.tensor([t.done for t in transitions], dtype=torch.float32)
+            advantages, returns = compute_gae(
+                rewards,
+                values,
+                dones,
+                gamma=self.gamma,
+                lam=self.lam,
+            )
+            for transition, advantage, return_value in zip(
+                transitions,
+                advantages.tolist(),
+                returns.tolist(),
+            ):
+                transition.advantage = advantage
+                transition.return_value = return_value
 
         return GameResult(
             transitions=transitions,
