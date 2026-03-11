@@ -137,6 +137,7 @@ class GameSimulator:
         fireworks_after: List[int],
         max_score: int,
         clue_adds_info: bool | None,
+        discarded_playable: bool | None,
         blocked_before: set[int] | None,
         state_after: HLEGameState,
     ) -> float:
@@ -153,12 +154,14 @@ class GameSimulator:
                         break
                 reward += float(added_rank or 1)
             else:
-                reward -= 1.0
+                reward -= 5.0
         elif move_type == pyhanabi.HanabiMoveType.DISCARD:
             blocked_after = self._blocked_colors(state_after)
             blocked_before = blocked_before or set()
             if len(blocked_after) > len(blocked_before):
-                reward -= 1.0
+                reward -= 8.0
+            if discarded_playable is True:
+                reward -= 2.0
         elif move_type in (
             pyhanabi.HanabiMoveType.REVEAL_COLOR,
             pyhanabi.HanabiMoveType.REVEAL_RANK,
@@ -292,8 +295,13 @@ class GameSimulator:
             score_before = sum(fireworks_before)
             blocked_before = None
             clue_adds_info = None
+            discarded_playable = None
             if move.type() == pyhanabi.HanabiMoveType.DISCARD:
                 blocked_before = self._blocked_colors(state)
+                current_hand = state.state.player_hands()[current_player]
+                if 0 <= move.card_index() < len(current_hand):
+                    card = current_hand[move.card_index()]
+                    discarded_playable = fireworks_before[card.color()] == card.rank()
             elif move.type() in (
                 pyhanabi.HanabiMoveType.REVEAL_COLOR,
                 pyhanabi.HanabiMoveType.REVEAL_RANK,
@@ -309,6 +317,7 @@ class GameSimulator:
                 fireworks_after=state.fireworks(),
                 max_score=state.max_score(),
                 clue_adds_info=clue_adds_info,
+                discarded_playable=discarded_playable,
                 blocked_before=blocked_before,
                 state_after=state,
             )
