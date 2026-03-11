@@ -136,6 +136,7 @@ class GameSimulator:
         fireworks_before: List[int],
         fireworks_after: List[int],
         max_score: int,
+        clue_adds_info: bool | None,
         blocked_before: set[int] | None,
         state_after: HLEGameState,
     ) -> float:
@@ -144,12 +145,13 @@ class GameSimulator:
 
         if move_type == pyhanabi.HanabiMoveType.PLAY:
             if sum(fireworks_after) > sum(fireworks_before):
-                # Reward early successful plays slightly more.
-                # fireworks entries are counts (0..num_ranks); sum is current score.
-                progress = 0.0
-                if max_score > 0:
-                    progress = min(1.0, max(0.0, float(sum(fireworks_before)) / float(max_score)))
-                reward += 1.0 + self.early_play_bonus * (1.0 - progress)
+                # Reward increases with the rank added to the fireworks (1..num_ranks).
+                added_rank = None
+                for before, after in zip(fireworks_before, fireworks_after):
+                    if after > before:
+                        added_rank = after
+                        break
+                reward += float(added_rank or 1)
             else:
                 reward -= 1.0
         elif move_type == pyhanabi.HanabiMoveType.DISCARD:
@@ -157,8 +159,42 @@ class GameSimulator:
             blocked_before = blocked_before or set()
             if len(blocked_after) > len(blocked_before):
                 reward -= 1.0
+        elif move_type in (
+            pyhanabi.HanabiMoveType.REVEAL_COLOR,
+            pyhanabi.HanabiMoveType.REVEAL_RANK,
+        ):
+            if clue_adds_info is True:
+                reward += 1.0
 
         return reward
+
+    def _clue_adds_info(self, state: HLEGameState, move: pyhanabi.HanabiMove) -> bool:
+        move_type = move.type()
+        if move_type not in (
+            pyhanabi.HanabiMoveType.REVEAL_COLOR,
+            pyhanabi.HanabiMoveType.REVEAL_RANK,
+        ):
+            return True
+
+        target = (state.current_player_index + move.target_offset()) % state.num_players
+        observation = state.observation_for_player(target)
+        card_knowledge = observation.card_knowledge()[0]
+        target_hand = state.state.player_hands()[target]
+
+        if move_type == pyhanabi.HanabiMoveType.REVEAL_COLOR:
+            clued_indices = [
+                idx
+                for idx, card in enumerate(target_hand)
+                if card.color() == move.color()
+            ]
+            return any(card_knowledge[idx].color() is None for idx in clued_indices)
+
+        clued_indices = [
+            idx
+            for idx, card in enumerate(target_hand)
+            if card.rank() == move.rank()
+        ]
+        return any(card_knowledge[idx].rank() is None for idx in clued_indices)
 
     @staticmethod
     def _format_move(move: pyhanabi.HanabiMove, current_player: int, num_players: int) -> str:
@@ -255,8 +291,14 @@ class GameSimulator:
             fireworks_before = state.fireworks()
             score_before = sum(fireworks_before)
             blocked_before = None
+            clue_adds_info = None
             if move.type() == pyhanabi.HanabiMoveType.DISCARD:
                 blocked_before = self._blocked_colors(state)
+            elif move.type() in (
+                pyhanabi.HanabiMoveType.REVEAL_COLOR,
+                pyhanabi.HanabiMoveType.REVEAL_RANK,
+            ):
+                clue_adds_info = self._clue_adds_info(state, move)
 
             state.apply_move_by_index(action_idx)
             previous_action_idx = action_idx
@@ -266,6 +308,7 @@ class GameSimulator:
                 fireworks_before=fireworks_before,
                 fireworks_after=state.fireworks(),
                 max_score=state.max_score(),
+                clue_adds_info=clue_adds_info,
                 blocked_before=blocked_before,
                 state_after=state,
             )
@@ -323,8 +366,9 @@ class GameSimulator:
         max_score = state.max_score()
 
         if transitions:
+            per_step_bonus = float(final_score) / float(max(num_turns, 1))
             for transition in transitions:
-                transition.reward += final_score
+                transition.reward += per_step_bonus
 
         if transitions:
             rewards = torch.tensor([t.reward for t in transitions], dtype=torch.float32)
