@@ -137,6 +137,7 @@ class GameSimulator:
         fireworks_after: List[int],
         max_score: int,
         clue_adds_info: bool | None,
+        played_card_was_clued: bool | None,
         discarded_playable: bool | None,
         blocked_before: set[int] | None,
         state_after: HLEGameState,
@@ -153,13 +154,18 @@ class GameSimulator:
                         added_rank = after
                         break
                 reward += 1 + float(added_rank or 1) * 1.5
+                
             else:
                 reward -= 2
+
+            if played_card_was_clued is True:
+                reward += 1
+
         elif move_type == pyhanabi.HanabiMoveType.DISCARD:
             blocked_after = self._blocked_colors(state_after)
             blocked_before = blocked_before or set()
             if len(blocked_after) > len(blocked_before):
-                reward -= 1.5
+                reward -= 2
             if discarded_playable is True:
                 reward -= 1
         elif move_type in (
@@ -167,7 +173,9 @@ class GameSimulator:
             pyhanabi.HanabiMoveType.REVEAL_RANK,
         ):
             if clue_adds_info is True:
-                reward += 3
+                reward += 2
+            else:
+                reward -=1
 
         return reward
 
@@ -295,8 +303,16 @@ class GameSimulator:
             score_before = sum(fireworks_before)
             blocked_before = None
             clue_adds_info = None
+            played_card_was_clued = None
             discarded_playable = None
-            if move.type() == pyhanabi.HanabiMoveType.DISCARD:
+            if move.type() == pyhanabi.HanabiMoveType.PLAY:
+                observation = state.observation_for_player(current_player)
+                card_knowledge = observation.card_knowledge()[0]
+                idx = move.card_index()
+                if 0 <= idx < len(card_knowledge):
+                    know = card_knowledge[idx]
+                    played_card_was_clued = (know.color() is not None) or (know.rank() is not None)
+            elif move.type() == pyhanabi.HanabiMoveType.DISCARD:
                 blocked_before = self._blocked_colors(state)
                 current_hand = state.state.player_hands()[current_player]
                 if 0 <= move.card_index() < len(current_hand):
@@ -317,6 +333,7 @@ class GameSimulator:
                 fireworks_after=state.fireworks(),
                 max_score=state.max_score(),
                 clue_adds_info=clue_adds_info,
+                played_card_was_clued=played_card_was_clued,
                 discarded_playable=discarded_playable,
                 blocked_before=blocked_before,
                 state_after=state,
