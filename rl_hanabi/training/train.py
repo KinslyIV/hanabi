@@ -52,6 +52,39 @@ def _resolve_resume_checkpoint(
     return None
 
 
+def _prune_iteration_checkpoints(checkpoint_dir: Path, *, keep_last: int = 10) -> None:
+    """Keep only the most recent N iteration checkpoints.
+
+    Does not touch checkpoint_latest.pt or checkpoint_final.pt.
+    """
+
+    if keep_last <= 0:
+        return
+
+    candidates = list(checkpoint_dir.glob("checkpoint_iter_*.pt"))
+    parsed: list[tuple[int, Path]] = []
+    for path in candidates:
+        stem = path.stem  # e.g., checkpoint_iter_12
+        prefix = "checkpoint_iter_"
+        if not stem.startswith(prefix):
+            continue
+        suffix = stem[len(prefix):]
+        try:
+            iteration = int(suffix)
+        except ValueError:
+            continue
+        parsed.append((iteration, path))
+
+    parsed.sort(key=lambda x: x[0])
+
+    to_delete = parsed[:-keep_last]
+    for _, path in to_delete:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            print(f"Warning: failed to delete old checkpoint {path}: {e}")
+
+
 def run_training(
     config: Dict[str, Dict[str, Any]],
     *,
@@ -200,7 +233,7 @@ def run_training(
         buffer=buffer,
         token_config=token_config,
         batch_size=batch_size,
-        shuffle_games=False,
+        shuffle_games=True,
         device=device,
     )
     dataloader = DataLoader(
@@ -316,6 +349,8 @@ def run_training(
                     "simulation_config": simulation_config,
                 },
             )
+
+            _prune_iteration_checkpoints(checkpoint_dir, keep_last=10)
             
             if use_wandb:
                 wandb.save(str(checkpoint_path))
