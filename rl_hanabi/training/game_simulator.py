@@ -203,6 +203,7 @@ class GameSimulator:
             current_player_value = None
             current_player_tokens: List[int] | None = None
             current_player_action_idx: int | None = None
+            current_player_action_prob: float | None = None
 
             for player_idx, player_model in enumerate(player_models):
                 tokens = self.tokenizer.tokenize_state_and_action(
@@ -232,9 +233,15 @@ class GameSimulator:
                     if self.temperature > 0:
                         masked_logits = masked_logits / self.temperature
                         probs = torch.softmax(masked_logits, dim=-1)
-                        current_player_action_idx = int(torch.multinomial(probs, 1).item())
+                        sampled_idx = int(torch.multinomial(probs, 1).item())
+                        current_player_action_idx = sampled_idx
+                        current_player_action_prob = float(probs[0, sampled_idx].item())
                     else:
+                        probs = torch.softmax(masked_logits, dim=-1)
                         current_player_action_idx = int(masked_logits.argmax(dim=-1).item())
+                        current_player_action_prob = float(
+                            probs[0, current_player_action_idx].item()
+                        )
 
                     current_player_value = value
                     current_player_tokens = tokens
@@ -270,7 +277,8 @@ class GameSimulator:
                         [
                             f"Turn {num_turns:02d} P{current_player} idx={action_idx:3d} "
                             f"{self._format_move(move, current_player, state.num_players)} "
-                            f"score {score_before}->{score_after} r={reward:+.3f}",
+                            f"score {score_before}->{score_after} r={reward:+.3f} "
+                            f"p={current_player_action_prob:.4f}",
                             f"Score {score_after}/{state.max_score()}",
                             str(state.state),
                             "-" * 72,
