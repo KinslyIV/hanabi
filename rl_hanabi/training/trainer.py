@@ -104,11 +104,17 @@ class HanabiTrainer:
 
         ret_mean = returns.mean()
         ret_std = returns.std(unbiased=False)
-        returns_norm = (returns - ret_mean) / (ret_std + 1e-8)
+        if ret_std < 1e-6:
+            returns_norm = returns
+        else:
+            returns_norm = (returns - ret_mean) / (ret_std + 1e-8)
 
         adv_mean = advantage.mean()
         adv_std = advantage.std(unbiased=False)
-        advantage_norm = (advantage - adv_mean) / (adv_std + 1e-8)
+        if adv_std < 1e-6:
+            advantage_norm = advantage
+        else:
+            advantage_norm = (advantage - adv_mean) / (adv_std + 1e-8)
 
         actor_loss = -(advantage_norm.detach() * chosen_log_prob).mean()
         critic_loss = F.smooth_l1_loss(value_1d, returns_norm)
@@ -116,6 +122,8 @@ class HanabiTrainer:
         entropy_loss = -self.c_e * entropy
 
         bc_loss_value = torch.zeros((), device=value_1d.device)
+        teacher_frac = torch.zeros((), device=value_1d.device)
+        teacher_count = torch.zeros((), device=value_1d.device)
         if self.c_bc and teacher_action_idx is not None and teacher_mask is not None:
             teacher_action_idx = teacher_action_idx.to(value_1d.device)
             teacher_mask = teacher_mask.to(value_1d.device)
@@ -123,6 +131,8 @@ class HanabiTrainer:
             n_classes = log_probs.size(-1)
             valid = teacher_mask & (teacher_action_idx >= 0) & (teacher_action_idx < n_classes)
             if valid.any():
+                teacher_count = valid.sum().to(value_1d.dtype)
+                teacher_frac = teacher_count / float(valid.numel())
                 bc_loss_value = F.nll_loss(
                     log_probs[valid],
                     teacher_action_idx[valid],
@@ -141,6 +151,10 @@ class HanabiTrainer:
             "mean_reward": returns.mean().item(),
             "mean_advantage": advantage.mean().item(),
             "mean_entropy": entropy.item(),
+            "adv_std": adv_std.item(),
+            "ret_std": ret_std.item(),
+            "teacher_frac": teacher_frac.item(),
+            "teacher_count": teacher_count.item(),
         }
 
         return total_loss, metrics

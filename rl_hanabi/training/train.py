@@ -317,6 +317,7 @@ def run_training(
                 print(f"  Step {steps_done}/{selfplay_cfg['train_steps_per_iteration']},    Loss: {metrics['total_loss']:.4f},    "
                       f"Value Loss: {metrics['value_loss']:.4f},    Action Loss: {metrics['action_loss']:.4f},    "
                       f"BC Loss: {metrics.get('bc_loss', 0.0):.4f},    "
+                      f"TeacherFrac: {metrics.get('teacher_frac', 0.0):.3f},    AdvStd: {metrics.get('adv_std', 0.0):.3f},    "
                       f"Entropy Loss: {metrics['entropy_loss']:.4f},    Mean Entropy: {metrics['mean_entropy']:.4f},    "
                       f"Mean Reward: {metrics['mean_reward']:.4f},    LR: {metrics['learning_rate']:.6f}    "
                       f"Mean Advantage: {metrics['mean_advantage']:.4f}")
@@ -328,6 +329,9 @@ def run_training(
                         "train/action_loss": metrics["action_loss"],
                         "train/value_loss": metrics["value_loss"],
                         "train/bc_loss": metrics.get("bc_loss", 0.0),
+                        "train/teacher_frac": metrics.get("teacher_frac", 0.0),
+                        "train/adv_std": metrics.get("adv_std", 0.0),
+                        "train/ret_std": metrics.get("ret_std", 0.0),
                         "train/entropy_loss": metrics["entropy_loss"],
                         "train/mean_reward": metrics["mean_reward"],
                         "train/mean_advantage": metrics["mean_advantage"],
