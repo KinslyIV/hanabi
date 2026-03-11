@@ -110,7 +110,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
     # Initialize WandB
     use_wandb = bool(wandb_cfg.get("enabled", False))
     if use_wandb:
-        run = init_wandb(
+        init_wandb(
             project_name=wandb_cfg.get("project", "hanabi-selfplay"),
             config=full_config,
             run_name=wandb_cfg.get("run_name"),
@@ -182,18 +182,27 @@ def run_training(config: Dict[str, Dict[str, Any]]):
 
         model.eval()
         collected = 0
-        for _ in range(selfplay_cfg["games_per_iteration"]):
-            result = simulator.simulate_game(config=game_config)
+        last_result = None
+        num_games_to_play = selfplay_cfg["games_per_iteration"]
+        for idx in range(num_games_to_play):
+            capture_states = idx == (num_games_to_play - 1)
+            result = simulator.simulate_game(config=game_config, capture_states=capture_states)
             buffer.add_game_result(result)
+            last_result = result
             collected += 1
-            if _ % 10 == 0:
-                print(f"Collected {_} games...")
+            if idx % 10 == 0:
+                print(f"Collected {idx} games...")
         model.train()
 
         simulator.clear_player_models()
 
         collection_time = time.time() - start_time
         print(f"Collected {collected} games in {collection_time:.2f}s")
+
+        if last_result is not None and last_result.debug_log:
+            print("\nSample gameplay (last collected game):")
+            print(f"Final score: {last_result.final_score}/{last_result.max_possible_score}, turns={last_result.num_turns}")
+            print("\n".join(last_result.debug_log))
         
         # Log game metrics
         buffer_stats = buffer.get_statistics()
@@ -275,6 +284,7 @@ def run_training(config: Dict[str, Dict[str, Any]]):
             simulation_config["temperature"] *= (1 - exploration_cfg["temperature_decay"])
             simulation_config["temperature"] = max(exploration_cfg["min_temperature"], simulation_config["temperature"])
             print(f"Temperature: {old_temp:.4f} -> {simulation_config['temperature']:.4f}")
+            simulator.temperature = simulation_config["temperature"]
     
     print("\nTraining complete!")
     

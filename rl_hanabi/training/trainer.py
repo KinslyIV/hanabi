@@ -97,7 +97,12 @@ class HanabiTrainer:
         value_1d = value.squeeze(-1)
         returns = returns.reshape(value_1d.shape)
         advantage = advantage.reshape(value_1d.shape)
-        actor_loss = -(advantage.detach() * chosen_log_prob).mean()
+
+        adv_mean = advantage.mean()
+        adv_std = advantage.std(unbiased=False)
+        advantage_norm = (advantage - adv_mean) / (adv_std + 1e-8)
+
+        actor_loss = -(advantage_norm.detach() * chosen_log_prob).mean()
         critic_loss = F.mse_loss(value_1d, returns)
         entropy = -(probs * log_probs).sum(dim=-1).mean()
         entropy_loss = -self.c_e * entropy

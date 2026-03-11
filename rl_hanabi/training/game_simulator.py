@@ -4,10 +4,9 @@ Game simulator for self-play training using tokenized state/action inputs.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List
 
-import numpy as np
 import torch
 
 from hanabi_learning_environment import pyhanabi
@@ -65,6 +64,7 @@ class GameResult:
     max_possible_score: int
     num_turns: int
     game_config: Dict[str, int]
+    debug_log: List[str] = field(default_factory=list)
 
 
 class GameSimulator:
@@ -76,6 +76,7 @@ class GameSimulator:
         temperature: float = 1.0,
         gamma: float = 0.99,
         lam: float = 0.95,
+        early_play_bonus: float = 1.0,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -83,6 +84,7 @@ class GameSimulator:
         self.temperature = temperature
         self.gamma = gamma
         self.lam = lam
+        self.early_play_bonus = early_play_bonus
         self._player_models: List[ActionDecoder] = []
         self._player_count = 0
 
@@ -133,6 +135,7 @@ class GameSimulator:
         move: pyhanabi.HanabiMove,
         fireworks_before: List[int],
         fireworks_after: List[int],
+        max_score: int,
         blocked_before: set[int] | None,
         state_after: HLEGameState,
     ) -> float:
@@ -141,7 +144,12 @@ class GameSimulator:
 
         if move_type == pyhanabi.HanabiMoveType.PLAY:
             if sum(fireworks_after) > sum(fireworks_before):
-                reward += 1.0
+                # Reward early successful plays slightly more.
+                # fireworks entries are counts (0..num_ranks); sum is current score.
+                progress = 0.0
+                if max_score > 0:
+                    progress = min(1.0, max(0.0, float(sum(fireworks_before)) / float(max_score)))
+                reward += 1.0 + self.early_play_bonus * (1.0 - progress)
             else:
                 reward -= 1.0
         elif move_type == pyhanabi.HanabiMoveType.DISCARD:
@@ -152,10 +160,27 @@ class GameSimulator:
 
         return reward
 
+    @staticmethod
+    def _format_move(move: pyhanabi.HanabiMove, current_player: int, num_players: int) -> str:
+        move_type = move.type()
+        if move_type == pyhanabi.HanabiMoveType.PLAY:
+            return f"PLAY slot {move.card_index()}"
+        if move_type == pyhanabi.HanabiMoveType.DISCARD:
+            return f"DISCARD slot {move.card_index()}"
+        if move_type == pyhanabi.HanabiMoveType.REVEAL_COLOR:
+            target = (current_player + move.target_offset()) % num_players
+            return f"CLUE color {move.color()} -> player {target}"
+        if move_type == pyhanabi.HanabiMoveType.REVEAL_RANK:
+            target = (current_player + move.target_offset()) % num_players
+            return f"CLUE rank {move.rank() + 1} -> player {target}"
+        return str(move)
+
     @torch.no_grad()
     def simulate_game(
         self,
         config: GameConfig,
+        *,
+        capture_states: bool = False,
     ) -> GameResult:
         state = HLEGameState.from_table_options(config)
 
@@ -163,6 +188,7 @@ class GameSimulator:
 
         # Model device/eval state should be set once in the worker.
         transitions: List[Transition] = []
+        debug_log: List[str] = []
         num_turns = 0
         previous_action_idx = -1  # No action for the first move
         # action_taken = []
@@ -220,6 +246,7 @@ class GameSimulator:
 
             move = state.index_to_move(action_idx)
             fireworks_before = state.fireworks()
+            score_before = sum(fireworks_before)
             blocked_before = None
             if move.type() == pyhanabi.HanabiMoveType.DISCARD:
                 blocked_before = self._blocked_colors(state)
@@ -231,9 +258,25 @@ class GameSimulator:
                 move=move,
                 fireworks_before=fireworks_before,
                 fireworks_after=state.fireworks(),
+                max_score=state.max_score(),
                 blocked_before=blocked_before,
                 state_after=state,
             )
+
+            score_after = state.score()
+            if capture_states:
+                debug_log.append(
+                    "\n".join(
+                        [
+                            f"Turn {num_turns:02d} P{current_player} idx={action_idx:3d} "
+                            f"{self._format_move(move, current_player, state.num_players)} "
+                            f"score {score_before}->{score_after} r={reward:+.3f}",
+                            f"Score {score_after}/{state.max_score()}",
+                            str(state.state),
+                            "-" * 72,
+                        ]
+                    )
+                )
 
             # DEBUG
             # move = state.index_to_move(action_idx)
@@ -272,7 +315,8 @@ class GameSimulator:
         max_score = state.max_score()
 
         if transitions:
-            transitions[-1].reward += final_score
+            for transition in transitions:
+                transition.reward += final_score
 
         if transitions:
             rewards = torch.tensor([t.reward for t in transitions], dtype=torch.float32)
@@ -304,5 +348,6 @@ class GameSimulator:
                 "num_ranks": config.num_ranks,
                 "hand_size": config.hand_size,
             },
+            debug_log=debug_log,
         )
 
