@@ -183,7 +183,7 @@ class HanabiTrainer:
         
         # Track metrics
         for key, value in metrics.items():
-            self.train_metrics[key].append(value)
+            self.train_metrics.setdefault(key, []).append(value)
         
         metrics["learning_rate"] = self.optimizer.param_groups[0]["lr"]
         metrics["global_step"] = self.global_step
