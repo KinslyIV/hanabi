@@ -219,13 +219,13 @@ class GameSimulator:
             if len(blocked_after) > len(blocked_before):
                 reward -= 2
             if discarded_playable is True:
-                reward -= 2
+                reward -= 1
         elif move_type in (
             pyhanabi.HanabiMoveType.REVEAL_COLOR,
             pyhanabi.HanabiMoveType.REVEAL_RANK,
         ):
             if clue_adds_info is True:
-                reward += 1
+                reward += 0.5
             else:
                 reward -=1
 
