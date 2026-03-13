@@ -179,6 +179,7 @@ class GameSequenceDataset(IterableDataset):
         self,
         transitions: List[Transition],
         reset_mask: List[bool],
+        perspective_players: List[int],
     ) -> Dict[str, torch.Tensor]:
         tokens_list = []
         legal_moves_mask_list = []
@@ -195,8 +196,31 @@ class GameSequenceDataset(IterableDataset):
         num_ranks_list = []
         hand_size_list = []
 
-        for t in transitions:
-            tokens_list.append(self._pad_tokens(t.tokens))
+        for t, perspective_player in zip(transitions, perspective_players):
+            padded = list(self._pad_tokens(t.tokens))
+
+            # Mask a fixed player's own hand across the whole game sequence.
+            # This keeps the model's recurrent state in one consistent perspective.
+            C = self.token_config.num_colors
+            H = self.token_config.hand_size
+            N = self.token_config.num_players
+            if perspective_player < 0 or perspective_player >= N:
+                raise ValueError(f"perspective_player {perspective_player} out of bounds")
+
+            hand_start = 4 + C
+            start = hand_start + perspective_player * H
+            end = start + H
+            if len(padded) < end:
+                raise ValueError(
+                    "Token sequence too short for masking in dataset: "
+                    f"len={len(padded)} < required_end={end}"
+                )
+
+            for i in range(start, end):
+                if padded[i] != self.token_config.pad_token:
+                    padded[i] = self.token_config.masked_card_token
+
+            tokens_list.append(padded)
             legal_moves_mask_list.append(t.legal_moves_mask)
             chosen_action_idx_list.append(t.chosen_action_idx)
             reward_list.append(t.reward)
@@ -255,18 +279,32 @@ class GameSequenceDataset(IterableDataset):
             if not group:
                 continue
 
+            # Choose one fixed perspective player per game in this group.
+            # Each game's transitions will be masked consistently to that player.
+            group_perspectives: List[int] = []
+            for game in group:
+                if not game:
+                    group_perspectives.append(0)
+                    continue
+                num_players = int(getattr(game[0], "game_config", {}).get("num_players", self.token_config.num_players))
+                num_players = max(1, min(num_players, self.token_config.num_players))
+                group_perspectives.append(random.randrange(num_players))
+
             max_len = max(len(game) for game in group)
             for step_idx in range(max_len):
                 transitions: List[Transition] = []
                 reset_mask: List[bool] = []
-                for game in group:
+                perspective_players: List[int] = []
+                for game_idx, game in enumerate(group):
                     if step_idx < len(game):
                         transitions.append(game[step_idx])
                         reset_mask.append(step_idx == 0)
+                        # Perspective is selected per game (not per step)
+                        perspective_players.append(group_perspectives[game_idx])
 
                 if not transitions:
                     continue
 
-                yield self._collate(transitions, reset_mask)
+                yield self._collate(transitions, reset_mask, perspective_players)
 
 

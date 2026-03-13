@@ -146,8 +146,8 @@ def main() -> None:
             state,
             previous_action_idx,
             state.current_player_index,
-            state.current_player_index,
         )
+        tokens = tokenizer.mask_player_hand_in_tokens(tokens, state.current_player_index)
         token_tensor = torch.tensor(
             tokenizer.pad_tokens(tokens),
             dtype=torch.long,

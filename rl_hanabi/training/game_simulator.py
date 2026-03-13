@@ -200,12 +200,8 @@ class GameSimulator:
         if move_type == pyhanabi.HanabiMoveType.PLAY:
             if sum(fireworks_after) > sum(fireworks_before):
                 # Reward increases with the rank added to the fireworks (1..num_ranks).
-                added_rank = None
-                for before, after in zip(fireworks_before, fireworks_after):
-                    if after > before:
-                        added_rank = after
-                        break
-                reward += 1 + float(added_rank or 1) * 1.5
+
+                reward += 2
                 
             else:
                 reward -= 2
@@ -217,7 +213,7 @@ class GameSimulator:
             blocked_after = self._blocked_colors(state_after)
             blocked_before = blocked_before or set()
             if len(blocked_after) > len(blocked_before):
-                reward -= 2
+                reward -= 1
             if discarded_playable is True:
                 reward -= 1
         elif move_type in (
@@ -225,9 +221,9 @@ class GameSimulator:
             pyhanabi.HanabiMoveType.REVEAL_RANK,
         ):
             if clue_adds_info is True:
-                reward += 0.5
+                reward += 1
             else:
-                reward -=1
+                reward -= 1
 
         return reward
 
@@ -298,6 +294,14 @@ class GameSimulator:
             if not legal_moves_mask.any():
                 break
 
+            # Tokenize once without masking; apply perspective masking per player model
+            # right before converting to tensors.
+            base_tokens = self.tokenizer.tokenize_state_and_action(
+                state,
+                previous_action_idx,
+                current_player,
+            )
+
             teacher_action_idx = -1
             teacher_mask = False
             if self.teacher_label_prob > 0:
@@ -317,12 +321,7 @@ class GameSimulator:
             current_player_action_prob: float | None = None
 
             for player_idx, player_model in enumerate(player_models):
-                tokens = self.tokenizer.tokenize_state_and_action(
-                    state,
-                    previous_action_idx,
-                    current_player,
-                    player_idx,
-                )
+                tokens = self.tokenizer.mask_player_hand_in_tokens(base_tokens, player_idx)
                 token_tensor = torch.tensor(
                     self.tokenizer.pad_tokens(tokens),
                     dtype=torch.long,
@@ -355,7 +354,9 @@ class GameSimulator:
                         )
 
                     current_player_value = value
-                    current_player_tokens = tokens
+                    # Store *unmasked* tokens in the replay transition. Training will
+                    # decide which player's perspective to mask per game.
+                    current_player_tokens = base_tokens
 
             if current_player_action_idx is None or current_player_tokens is None:
                 break
@@ -458,7 +459,7 @@ class GameSimulator:
         max_score = state.max_score()
 
         if transitions:
-            per_step_bonus = float(final_score) / float(max(num_turns, 1))
+            per_step_bonus = float(final_score) / float(max_score)
             for transition in transitions:
                 transition.reward += per_step_bonus
 

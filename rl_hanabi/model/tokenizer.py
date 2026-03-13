@@ -114,6 +114,39 @@ class HLETokenizer:
             tokens = tokens + [self.config.pad_token] * (context_size - len(tokens))
         return tokens
 
+    def mask_player_hand_in_tokens(self, tokens: List[int], player_idx: int) -> List[int]:
+        """Return a copy of `tokens` where `player_idx`'s hand is masked.
+
+        This does *not* tokenize the state; it only applies the visibility constraint
+        (the masked player's own hand is hidden) to an already-tokenized sequence.
+
+        Expected token layout (unpadded or padded):
+          [current_player, life, info, prev_action, fireworks(C), hands(N*H), discard...]
+
+        Masking is applied only to the hand segment and preserves PAD tokens.
+        """
+
+        N = self.config.num_players
+        H = self.config.hand_size
+        C = self.config.num_colors
+        if player_idx < 0 or player_idx >= N:
+            raise ValueError(f"player_idx {player_idx} out of bounds")
+
+        hand_start = 4 + C
+        start = hand_start + player_idx * H
+        end = start + H
+        if len(tokens) < end:
+            raise ValueError(
+                "Token sequence too short for masking: "
+                f"len={len(tokens)} < required_end={end} (player_idx={player_idx})"
+            )
+
+        masked = list(tokens)
+        for i in range(start, end):
+            if masked[i] != self.config.pad_token:
+                masked[i] = self.config.masked_card_token
+        return masked
+
     def action_logits_from_model(
         self,
         card_action_logits: torch.Tensor,
@@ -322,7 +355,7 @@ class HLETokenizer:
         state: "HLEGameState",
         action: Union[pyhanabi.HanabiMove, int],
         current_player: int,
-        model_player: int,
+        model_player: int | None = None,
     ) -> List[int]:
         self._validate_state_config(state)
         tokens: List[int] = []
@@ -346,10 +379,11 @@ class HLETokenizer:
 
         hands = list(state.state.player_hands())
 
-        # Mask the player who the model is playing as
+        # Do not mask here: store full-information tokens and apply masking
+        # at the point of use (self-play/inference) or in the dataset (training).
+        # `model_player` is kept for backward compatibility but is ignored.
         for player_idx in range(self.config.num_players):
-            is_current = player_idx == model_player
-            tokens.extend(self.tokenize_hand(list(hands[player_idx]), mask=is_current))
+            tokens.extend(self.tokenize_hand(list(hands[player_idx]), mask=False))
 
         tokens.extend(self.tokenize_discard_pile(state))
         

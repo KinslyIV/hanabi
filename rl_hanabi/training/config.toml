@@ -37,16 +37,23 @@ dropout = 0.1
 # =============================================================================
 [training]
 # Optimizer settings
-learning_rate = 5e-3
+learning_rate = 1e-4
 weight_decay = 0
 max_grad_norm = 1.0
+
+# Optional auxiliary behavior cloning (cross-entropy) loss on a subset of steps.
+# Set bc_loss_weight > 0 to enable.
+bc_loss_weight = 0.3
+
+# Probability of attaching a teacher label on "obvious" states (e.g., fully-known playable card).
+teacher_label_prob = 0.7
 
 # Learning rate scheduler
 scheduler_t0 = 1000
 scheduler_t_mult = 2
 min_lr = 1e-6
 critic_loss_weight = 1.0
-entropy_loss_weight = 0.01
+entropy_loss_weight = 0.05
 
 # Batch size
 batch_size = 64
@@ -56,16 +63,16 @@ batch_size = 64
 # =============================================================================
 [selfplay]
 # Games to play per iteration
-games_per_iteration = 50
+games_per_iteration = 100
 
 # Training steps per iteration
 train_steps_per_iteration = 500
 
 # Total number of iterations
-num_iterations = 50
+num_iterations = 100
 
 # Replay buffer size (number of transitions)
-buffer_size = 10000
+buffer_size = 50000
 
 # =============================================================================
 # Game Configuration
@@ -81,7 +88,7 @@ num_ranks = 5
 # =============================================================================
 [exploration]
 # Temperature for action sampling (higher = more random)
-temperature = 1.0
+temperature = 1.5
 
 # Temperature decay per iteration (set to 0 to disable)
 temperature_decay = 0.01
@@ -94,7 +101,7 @@ min_temperature = 0.1
 # =============================================================================
 [logging]
 # Log training metrics every N steps
-log_interval = 100
+log_interval = 50
 
 # Save checkpoint every N iterations
 save_interval = 10
@@ -138,7 +145,7 @@ enabled = true
 project = "hanabi-selfplay"
 
 # Run name (optional, auto-generated if not specified)
-run_name = "blizzard-eternel"
+run_name = "gear4-tank-man"
 
 # Tags for this run (comma-separated)
 tags = "self-play,training"
