@@ -82,6 +82,7 @@ class HanabiTrainer:
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         
         tokens = batch["tokens"]
+        masked_tokens = batch["masked_tokens"]
         legal_moves_mask = batch["legal_moves_mask"]
         chosen_action_idx = batch["chosen_action_idx"]
         advantage = batch["advantage"]
@@ -90,7 +91,7 @@ class HanabiTrainer:
         teacher_action_idx = batch.get("teacher_action_idx")
         teacher_mask = batch.get("teacher_mask")
 
-        card_action_logits, value = self.model(tokens)
+        card_action_logits, value = self.model(masked_tokens)
         action_logits = self.tokenizer.action_logits_from_model(card_action_logits, tokens, current_player)
 
         masked_logits = action_logits.masked_fill(~legal_moves_mask, -1e9)

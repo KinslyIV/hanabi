@@ -182,6 +182,7 @@ class GameSequenceDataset(IterableDataset):
         perspective_players: List[int],
     ) -> Dict[str, torch.Tensor]:
         tokens_list = []
+        masked_tokens_list = []
         legal_moves_mask_list = []
         chosen_action_idx_list = []
         reward_list = []
@@ -198,9 +199,10 @@ class GameSequenceDataset(IterableDataset):
 
         for t, perspective_player in zip(transitions, perspective_players):
             padded = list(self._pad_tokens(t.tokens))
+            tokens_list.append(padded)
 
-            # Mask a fixed player's own hand across the whole game sequence.
-            # This keeps the model's recurrent state in one consistent perspective.
+            # Prepare masked tokens for model input, but keep unmasked tokens
+            # for action-logit mapping when the perspective player is targeted.
             C = self.token_config.num_colors
             H = self.token_config.hand_size
             N = self.token_config.num_players
@@ -216,11 +218,11 @@ class GameSequenceDataset(IterableDataset):
                     f"len={len(padded)} < required_end={end}"
                 )
 
+            masked = list(padded)
             for i in range(start, end):
-                if padded[i] != self.token_config.pad_token:
-                    padded[i] = self.token_config.masked_card_token
-
-            tokens_list.append(padded)
+                if masked[i] != self.token_config.pad_token:
+                    masked[i] = self.token_config.masked_card_token
+            masked_tokens_list.append(masked)
             legal_moves_mask_list.append(t.legal_moves_mask)
             chosen_action_idx_list.append(t.chosen_action_idx)
             reward_list.append(t.reward)
@@ -237,6 +239,7 @@ class GameSequenceDataset(IterableDataset):
 
         device = self.device
         tokens = torch.tensor(tokens_list, dtype=torch.long, device=device)
+        masked_tokens = torch.tensor(masked_tokens_list, dtype=torch.long, device=device)
         legal_moves_mask = torch.tensor(legal_moves_mask_list, dtype=torch.bool, device=device)
         chosen_action_idx = torch.tensor(chosen_action_idx_list, dtype=torch.long, device=device)
         reward = torch.tensor(reward_list, dtype=torch.float32, device=device)
@@ -253,6 +256,7 @@ class GameSequenceDataset(IterableDataset):
 
         return {
             "tokens": tokens,
+            "masked_tokens": masked_tokens,
             "legal_moves_mask": legal_moves_mask,
             "chosen_action_idx": chosen_action_idx,
             "reward": reward,
@@ -266,6 +270,7 @@ class GameSequenceDataset(IterableDataset):
             "num_colors": num_colors,
             "num_ranks": num_ranks,
             "hand_size": hand_size,
+            "perspective_player": torch.tensor(perspective_players, dtype=torch.long, device=device),
             "reset_mask": torch.tensor(reset_mask, dtype=torch.bool, device=device),
         }
 
