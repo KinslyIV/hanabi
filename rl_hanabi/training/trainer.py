@@ -39,6 +39,7 @@ class HanabiTrainer:
         self.tokenizer = tokenizer
         self.token_config = tokenizer.config
         self.checkpoint_dir = checkpoint_dir
+        self.loss_mode = config.get("loss_mode", "actor_critic")
         self.c = config.get("critic_loss_weight", 1.0)
         self.c_e = config.get("entropy_loss_weight", 0.0)
         self.c_bc = config.get("bc_loss_weight", 0.0)
@@ -103,6 +104,27 @@ class HanabiTrainer:
         returns = returns.reshape(value_1d.shape)
         advantage = advantage.reshape(value_1d.shape)
 
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+
+        if self.loss_mode == "supervised":
+            action_loss = F.nll_loss(log_probs, chosen_action_idx, reduction="mean")
+            total_loss = action_loss
+            metrics = {
+                "total_loss": total_loss.item(),
+                "action_loss": action_loss.item(),
+                "value_loss": 0.0,
+                "entropy_loss": 0.0,
+                "bc_loss": 0.0,
+                "mean_reward": 0.0,
+                "mean_advantage": 0.0,
+                "mean_entropy": entropy.item(),
+                "adv_std": 0.0,
+                "ret_std": 0.0,
+                "teacher_frac": 0.0,
+                "teacher_count": 0.0,
+            }
+            return total_loss, metrics
+
         ret_mean = returns.mean()
         ret_std = returns.std(unbiased=False)
         if ret_std < 1e-6:
@@ -119,7 +141,6 @@ class HanabiTrainer:
 
         actor_loss = -(advantage_norm.detach() * chosen_log_prob).mean()
         critic_loss = F.smooth_l1_loss(value_1d, returns_norm)
-        entropy = -(probs * log_probs).sum(dim=-1).mean()
         entropy_loss = -self.c_e * entropy
 
         bc_loss_value = torch.zeros((), device=value_1d.device)

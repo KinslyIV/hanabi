@@ -3,8 +3,9 @@
 from rl_hanabi.training.game_simulator import (
     GameSimulator,
     GameResult,
-    Transition
+    Transition,
 )
+from rl_hanabi.training.bot_game_simulator import BotGameSimulator
 from rl_hanabi.game import GameConfig
 from rl_hanabi.training.data_collection import (
     ReplayBuffer,
@@ -19,6 +20,7 @@ from rl_hanabi.training.trainer import (
 __all__ = [
     # Game simulation
     "GameSimulator",
+    "BotGameSimulator",
     "GameConfig",
     "GameResult",
     "Transition",

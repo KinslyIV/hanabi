@@ -1,11 +1,12 @@
 # Hanabi Token-Based Training
 
-This refactor trims the training loop to a token-based, AlphaZero-style pipeline using the new `HLETokenizer` and `ActionDecoder`. The training path no longer depends on belief state or MCTS and keeps distributed self-play (CPU) separate from GPU training.
+This refactor trims the training loop to a token-based pipeline using the new `HLETokenizer` and `ActionDecoder`. The training path no longer depends on belief state or MCTS and keeps distributed self-play (CPU) separate from GPU training.
 
 ## Key decisions
 - **State encoding:** `HLETokenizer` builds the token sequence as `[life, info, previous_action] + fireworks + hands + discard`. Discard tokens are truncated from the front if needed to fit `context_size`.
 - **Action selection:** `ActionDecoder` outputs per-card logits for `[discard, play, clue-color, clue-rank]`. Clue logits are aggregated by **max** over target-player cards that share the same color/rank.
-- **Reward:** only the **final normalized score** is used as the policy gradient reward.
+- **Training data:** supports bot-vs-bot transitions (beginner H-Group policy port) for supervised cross-entropy training.
+- **Reward:** only the **final normalized score** is used as the policy gradient reward in actor-critic mode.
 - **Previous action token:** the previous move token is passed as the action token; the first move uses the pad token.
 - **Removed from training:** belief state tracking and MCTS data collection.
 

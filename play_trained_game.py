@@ -13,6 +13,7 @@ import torch
 from hanabi_learning_environment import pyhanabi
 
 from rl_hanabi.game import HLEGameState
+from rl_hanabi.bot.hgroup_bot import HGroupBotPolicy
 from rl_hanabi.model.action_decoder import ActionDecoder, ActionDecoderConfig
 from rl_hanabi.model.tokenizer import HLETokenizer, TokenizationConfig
 from rl_hanabi.training.utils import build_game_config, load_config
@@ -71,6 +72,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Play a Hanabi game with the trained model")
     parser.add_argument("--config", type=str, default=str(Path(__file__).with_name("rl_hanabi").joinpath("training", "config.toml")))
     parser.add_argument("--preset", type=str, default=None)
+    parser.add_argument("--use-bots", action="store_true", help="Use H-Group bots for non-model players")
+    parser.add_argument("--model-player", type=int, default=None, help="Player index controlled by the model")
+    parser.add_argument("--bot-stochastic", action="store_true", help="Sample bot actions stochastically")
+    parser.add_argument("--bot-temperature", type=float, default=None, help="Bot sampling temperature")
 
     args = parser.parse_args()
 
@@ -85,6 +90,10 @@ def main() -> None:
     show_hands = bool(play_cfg.get("show_hands", False))
     seed = int(play_cfg.get("seed", -1))
     max_turns = int(play_cfg.get("max_turns", 0))
+    use_bots = bool(args.use_bots or play_cfg.get("use_bots", False))
+    model_player = args.model_player if args.model_player is not None else int(play_cfg.get("model_player", 0))
+    bot_stochastic = bool(args.bot_stochastic or play_cfg.get("bot_stochastic", False))
+    bot_temperature = args.bot_temperature if args.bot_temperature is not None else float(play_cfg.get("bot_temperature", 1.0))
 
     if device_name == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -130,6 +139,7 @@ def main() -> None:
     model.eval()
 
     tokenizer = HLETokenizer(token_config)
+    bot_policy = HGroupBotPolicy(stochastic=bot_stochastic, temperature=bot_temperature)
 
     state = HLEGameState.from_table_options(game_config)
     previous_action_idx = -1
@@ -141,13 +151,23 @@ def main() -> None:
 
         print_state(state, show_hands, turn)
 
+        current_player = state.current_player_index
+        if use_bots and current_player != model_player:
+            action_idx = bot_policy.select_action_index(state)
+            chosen_move = state.index_to_move(action_idx)
+            print(f"Bot action: idx={action_idx} {format_move(chosen_move, current_player, state.num_players)}")
+            state.apply_move_by_index(action_idx)
+            previous_action_idx = action_idx
+            turn += 1
+            continue
+
         legal_moves_mask = state.legal_moves_mask()
         tokens = tokenizer.tokenize_state_and_action(
             state,
             previous_action_idx,
-            state.current_player_index,
+            current_player,
         )
-        tokens = tokenizer.mask_player_hand_in_tokens(tokens, state.current_player_index)
+        tokens = tokenizer.mask_player_hand_in_tokens(tokens, current_player)
         token_tensor = torch.tensor(
             tokenizer.pad_tokens(tokens),
             dtype=torch.long,
@@ -156,7 +176,7 @@ def main() -> None:
 
         with torch.no_grad():
             card_action_logits, value = model(token_tensor)
-            current_player_tensor = torch.tensor([state.current_player_index], device=device)
+            current_player_tensor = torch.tensor([current_player], device=device)
             action_logits = tokenizer.action_logits_from_model(
                 card_action_logits,
                 token_tensor,
@@ -184,7 +204,7 @@ def main() -> None:
             print(f"  p={prob:.4f} idx={idx:3d} {format_move(move, state.current_player_index, state.num_players)}")
 
         chosen_move = state.index_to_move(action_idx)
-        print(f"Chosen action: idx={action_idx} {format_move(chosen_move, state.current_player_index, state.num_players)}")
+        print(f"Chosen action: idx={action_idx} {format_move(chosen_move, current_player, state.num_players)}")
 
         state.apply_move_by_index(action_idx)
         previous_action_idx = action_idx

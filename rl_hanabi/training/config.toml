@@ -41,12 +41,15 @@ learning_rate = 1e-4
 weight_decay = 0
 max_grad_norm = 1.0
 
+# Training loss mode: "actor_critic" or "supervised"
+loss_mode = "supervised"
+
 # Optional auxiliary behavior cloning (cross-entropy) loss on a subset of steps.
 # Set bc_loss_weight > 0 to enable.
-bc_loss_weight = 0.3
+bc_loss_weight = 0.0
 
 # Probability of attaching a teacher label on "obvious" states (e.g., fully-known playable card).
-teacher_label_prob = 0.7
+teacher_label_prob = 0.0
 
 # Learning rate scheduler
 scheduler_t0 = 1000
@@ -56,7 +59,7 @@ critic_loss_weight = 1.0
 entropy_loss_weight = 0.05
 
 # Batch size
-batch_size = 64
+batch_size = 8
 
 # =============================================================================
 # Self-Play Configuration
@@ -64,6 +67,13 @@ batch_size = 64
 [selfplay]
 # Games to play per iteration
 games_per_iteration = 100
+
+# Data source for training transitions: "selfplay" or "bot"
+data_source = "bot"
+
+# Bot policy sampling options (used when data_source="bot")
+bot_stochastic = false
+bot_temperature = 1
 
 # Training steps per iteration
 train_steps_per_iteration = 500
@@ -107,10 +117,10 @@ log_interval = 50
 save_interval = 10
 
 # Checkpoint directory
-checkpoint_dir = "/workspace/checkpoints"
+checkpoint_dir = "./checkpoints"
 
 # Buffer save directory (optional)
-buffer_dir = "/workspace/buffer_dir"
+buffer_dir = "./buffer_dir"
 
 # =============================================================================
 # Play Configuration
@@ -120,7 +130,7 @@ buffer_dir = "/workspace/buffer_dir"
 device = "auto"
 
 # Checkpoint location (uses checkpoint_latest.pt if present)
-checkpoint_dir = "/workspace/checkpoints"
+checkpoint_dir = "./checkpoints"
 checkpoint = ""
 
 # Action selection settings
@@ -130,6 +140,12 @@ topk = 5
 # Display settings
 show_hands = true
 max_turns = 0
+
+# Use H-Group bots for non-model players
+use_bots = false
+model_player = 0
+bot_stochastic = false
+bot_temperature = 1.0
 
 # Game seed (-1 = random)
 seed = -1
@@ -145,13 +161,13 @@ enabled = true
 project = "hanabi-selfplay"
 
 # Run name (optional, auto-generated if not specified)
-run_name = "gear4-tank-man"
+run_name = "gear4-snake-man"
 
 # Tags for this run (comma-separated)
 tags = "self-play,training"
 
 # wandb directory
-dir_path = "/workspace/wandb"
+dir_path = "./wandb"
 
 # =============================================================================
 # Preset Configurations
@@ -165,7 +181,7 @@ dir_path = "/workspace/wandb"
 num_iterations = 5
 games_per_iteration = 20
 train_steps_per_iteration = 100
-batch_size = 64
+batch_size = 8
 buffer_size = 10000
 log_interval = 10
 save_interval = 5

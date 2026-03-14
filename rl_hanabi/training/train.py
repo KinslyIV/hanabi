@@ -21,6 +21,8 @@ from rl_hanabi.model.action_decoder import ActionDecoder, ActionDecoderConfig
 from rl_hanabi.model.tokenizer import HLETokenizer, TokenizationConfig
 from rl_hanabi.training.utils import build_game_config, load_config
 from rl_hanabi.training.game_simulator import GameSimulator
+from rl_hanabi.training.bot_game_simulator import BotGameSimulator
+from rl_hanabi.bot.hgroup_bot import HGroupBotPolicy
 from rl_hanabi.training.data_collection import (
     ReplayBuffer,
     GameSequenceDataset,
@@ -203,13 +205,21 @@ def run_training(
         checkpoint_dir=checkpoint_dir,
     )
 
-    simulator = GameSimulator(
-        model=model,
-        tokenizer=tokenizer,
-        device=device,
-        temperature=simulation_config.get("temperature", 1.0),
-        teacher_label_prob=training_cfg.get("teacher_label_prob", 0.0),
-    )
+    data_source = selfplay_cfg.get("data_source", "selfplay")
+    if data_source == "bot":
+        bot_policy = HGroupBotPolicy(
+            stochastic=bool(selfplay_cfg.get("bot_stochastic", False)),
+            temperature=float(selfplay_cfg.get("bot_temperature", 1.0)),
+        )
+        simulator = BotGameSimulator(tokenizer=tokenizer, bot_policy=bot_policy)
+    else:
+        simulator = GameSimulator(
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            temperature=simulation_config.get("temperature", 1.0),
+            teacher_label_prob=training_cfg.get("teacher_label_prob", 0.0),
+        )
 
     start_iteration = 0
     if resume:
@@ -225,7 +235,8 @@ def run_training(
             ckpt_sim_cfg = checkpoint.get("simulation_config")
             if isinstance(ckpt_sim_cfg, dict) and "temperature" in ckpt_sim_cfg:
                 simulation_config["temperature"] = float(ckpt_sim_cfg["temperature"])
-                simulator.temperature = simulation_config["temperature"]
+                if hasattr(simulator, "temperature"):
+                    simulator.temperature = simulation_config["temperature"]
             print(f"Resuming from iteration {start_iteration + 1}")
 
     batch_size = training_cfg["batch_size"]
@@ -272,7 +283,8 @@ def run_training(
                 print(f"Collected {idx} games...")
         model.train()
 
-        simulator.clear_player_models()
+        if hasattr(simulator, "clear_player_models"):
+            simulator.clear_player_models()
 
         collection_time = time.time() - start_time
         print(f"Collected {collected} games in {collection_time:.2f}s")
@@ -377,7 +389,8 @@ def run_training(
             simulation_config["temperature"] *= (1 - exploration_cfg["temperature_decay"])
             simulation_config["temperature"] = max(exploration_cfg["min_temperature"], simulation_config["temperature"])
             print(f"Temperature: {old_temp:.4f} -> {simulation_config['temperature']:.4f}")
-            simulator.temperature = simulation_config["temperature"]
+            if hasattr(simulator, "temperature"):
+                simulator.temperature = simulation_config["temperature"]
     
     print("\nTraining complete!")
     
