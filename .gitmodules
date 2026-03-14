@@ -4,6 +4,6 @@ url = https://github.com/KinslyIV/hanabi-learning-environment.git
 	branch = master
 	
 [submodule "hanabi-bot"]
-path = hanabi-bot
-url = https://github.com/will-hanabi-bot/hanabi-bot.git
+	path = hanabi-bot
+	url = https://github.com/will-hanabi-bot/hanabi-bot.git
 	branch = master
