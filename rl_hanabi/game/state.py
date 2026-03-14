@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 import logging
 from typing import List, Optional, Dict, Any
 
-from hanabi_learning_environment import pyhanabi
+
 from .game_types import ACTION, CLUE, PerformAction
 from .hle_state import HLEGameState
-from rl_hanabi.training.token_utils import GameConfig
+from rl_hanabi.game import GameConfig
 
 
 MAX_CLUES = 8

@@ -1,6 +1,7 @@
 """Demo script showing HLE game initialization, moves, and player observations."""
 
 from rl_hanabi.game.hle_state import HLEGameState
+from rl_hanabi.training.token_utils import GameConfig
 
 
 def main():
@@ -16,7 +17,19 @@ def main():
     num_players = 3
     our_index = 0
 
-    game_state = HLEGameState.from_table_options(options, num_players)
+    game_config = GameConfig(
+        num_players=num_players,
+        num_colors=options.get("numSuits", 5),
+        num_ranks=options.get("numRanks", 5),
+        hand_size=options.get("cardsPerHand", 5),
+        max_information_tokens=options.get("clueTokens", 8),
+        max_life_tokens=options.get("strikeTokens", 3),
+        seed=options.get("seed", -1),
+    )
+    game_state = HLEGameState.from_table_options(
+        game_config,
+        starting_player=options.get("startingPlayer", 0),
+    )
 
     print("=" * 60)
     print("Initial Game State")

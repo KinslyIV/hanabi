@@ -15,9 +15,9 @@ import numpy as np
 import torch
 from hanabi_learning_environment import pyhanabi
 
-from rl_hanabi.model.action_decoder import ActionDecoder
-from rl_hanabi.game.hle_state import HLEGameState
-from rl_hanabi.belief.belief_state import BeliefState
+from rl_hanabi.model import ActionDecoder
+from rl_hanabi.game import HLEGameState
+from rl_hanabi.game import GameConfig
 
 
 # ANSI color codes for terminal output
@@ -384,7 +384,19 @@ def play_game(
     }
     
     # Initialize game
-    state = HLEGameState.from_table_options(options, num_players)
+    game_config = GameConfig(
+        num_players=num_players,
+        num_colors=options.get("numSuits", 5),
+        num_ranks=options.get("numRanks", 5),
+        hand_size=options.get("cardsPerHand", 5),
+        max_information_tokens=options.get("clueTokens", 8),
+        max_life_tokens=options.get("strikeTokens", 3),
+        seed=options.get("seed", -1),
+    )
+    state = HLEGameState.from_table_options(
+        game_config,
+        starting_player=options.get("startingPlayer", 0),
+    )
     
     # Create belief states for all players
     belief_states = [

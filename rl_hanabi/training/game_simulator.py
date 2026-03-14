@@ -199,15 +199,12 @@ class GameSimulator:
 
         if move_type == pyhanabi.HanabiMoveType.PLAY:
             if sum(fireworks_after) > sum(fireworks_before):
-                # Reward increases with the rank added to the fireworks (1..num_ranks).
+                # Only reward successful plays that were clued.
+                if played_card_was_clued is True:
+                    reward += 2
 
-                reward += 2
-                
             else:
                 reward -= 2
-
-            if played_card_was_clued is True:
-                reward += 1
 
         elif move_type == pyhanabi.HanabiMoveType.DISCARD:
             blocked_after = self._blocked_colors(state_after)

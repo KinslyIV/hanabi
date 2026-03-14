@@ -193,7 +193,7 @@ class ActionDecoder(nn.Module):
 
         self.pad_token = token_config.pad_token
 
-        self.action_space_size = token_config.action_space_size
+        self.action_space_size = token_config.action_space_size + 1
         self.total_card_tokens = token_config.total_card_tokens
         self.context_size = token_config.context_size
 
