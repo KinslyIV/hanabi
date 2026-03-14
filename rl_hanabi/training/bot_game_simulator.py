@@ -42,6 +42,7 @@ class BotGameSimulator:
         capture_states: bool = False,
     ) -> GameResult:
         state = HLEGameState.from_table_options(config)
+        self.bot_policy.reset(state)
         transitions: List[Transition] = []
         debug_log: List[str] = []
         num_turns = 0
@@ -61,6 +62,7 @@ class BotGameSimulator:
 
             action_idx = self.bot_policy.select_action_index(state)
             move = state.index_to_move(action_idx)
+            self.bot_policy.observe_move(state, move)
             state.apply_move_by_index(action_idx)
             previous_action_idx = action_idx
 

@@ -42,3 +42,9 @@ class HGroupBotPolicy:
         action_idx = self.select_action_index(state)
         state.apply_move_by_index(action_idx)
         return action_idx
+
+    def observe_move(self, state_before: HLEGameState, move: pyhanabi.HanabiMove) -> None:
+        self._policy.observe_move(state_before, move)
+
+    def reset(self, state: HLEGameState) -> None:
+        self._policy.reset(state)

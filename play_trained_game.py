@@ -142,6 +142,8 @@ def main() -> None:
     bot_policy = HGroupBotPolicy(stochastic=bot_stochastic, temperature=bot_temperature)
 
     state = HLEGameState.from_table_options(game_config)
+    if use_bots:
+        bot_policy.reset(state)
     previous_action_idx = -1
     turn = 0
 
@@ -156,6 +158,7 @@ def main() -> None:
             action_idx = bot_policy.select_action_index(state)
             chosen_move = state.index_to_move(action_idx)
             print(f"Bot action: idx={action_idx} {format_move(chosen_move, current_player, state.num_players)}")
+            bot_policy.observe_move(state, chosen_move)
             state.apply_move_by_index(action_idx)
             previous_action_idx = action_idx
             turn += 1
@@ -206,6 +209,8 @@ def main() -> None:
         chosen_move = state.index_to_move(action_idx)
         print(f"Chosen action: idx={action_idx} {format_move(chosen_move, current_player, state.num_players)}")
 
+        if use_bots:
+            bot_policy.observe_move(state, chosen_move)
         state.apply_move_by_index(action_idx)
         previous_action_idx = action_idx
         turn += 1
